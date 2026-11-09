@@ -377,6 +377,22 @@
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string. Part: {document, units:'m', sweeps:[{name, type, suppressed?, profile?, profile_diameter_m?, path, path_length_m, path_segments?, path_edge_count?, path_type?, per_segment?, warning?}], sweep_path_length_m, sketches:[{name, kind:'3d'|'2d', suppressed?, length_m, segments:{<kind>:{count, length_m}}, construction_length_m?, per_segment?}]}. Assembly: {document, units, root:{sweeps, sweep_path_length_m, sketches}, components:[{path, config, instances[], warning?, sweeps, sweep_path_length_m, sketches}], total_sweep_path_length_m (summed over all instances), skipped?:[{name, reason}]}; components with no sweep or reported sketch are omitted."
  },
+ "screenshot": {
+  "description": "Saves the active document's graphics view as a PNG (IModelDoc2.SaveBMP to a temporary BMP, converted with System.Drawing); the document file is never written. Optionally switches to a standard view orientation (IModelDoc2.ShowNamedView2 with swStandardViews_e) and zooms to fit first, and draws an optional caption band under the image. Changes only the on-screen view; does NOT increment state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "file_path": "string (required — full output path ending in .png; missing folders are created)",
+    "view": "string (optional, default 'current' — 'current', 'isometric', 'trimetric', 'dimetric', 'front', 'back', 'left', 'right', 'top' or 'bottom')",
+    "zoom_to_fit": "boolean (optional, default true)",
+    "width": "integer (optional, default 0 = window width — image width in pixels)",
+    "height": "integer (optional, default 0 = window height — image height in pixels)",
+    "caption": "string (optional — text drawn in a white band under the image, lines split on '\\n', first line bold)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {file_path, width, height, view}."
+ },
  "analyze_drawing": {
   "description": "[ADAPTER-ONLY — no C# case] Reads a 2D technical drawing (.DXF or .DWG; a DWG is converted automatically) and returns ONE OF TWO SHAPES, chosen by the READER, never the caller: DIRECT_BUILDABLE (a short plain-text summary of a flat pattern already lowered to Feature Graph IR — blank, thickness + its source, each bend with its edge-class corroboration, skipped bends, expected volume; the contour deliberately NOT echoed back, so it never costs tokens twice), or 'NOT_DIRECT | <gate reason>' followed by the WHOLE `draw`-dialect artifact. SINGLE HOME FOR THE PAYLOAD LEGEND (2026-09-07, payload phase 5): this tool's model-facing docstring in server.py documents what every field MEANS — the edge classes, the class-grouped index-carrying `lines`, `open_singles`, `seq`, the ellipse provenance, the graded alignment, `tier`, `printed`/`printed_mismatch`/`kind_from`/`measures` — because that description reaches the model whether or not it ever calls get_recipe, which a recipe section cannot promise (ADR-077). The recipe's `reverse` section carries the DECISIONS only, and neither repeats the other. Guidance attached to a SINGLE flag is emitted as an adapter-side ADVISORIES block, only when that flag actually fires. Every number is TRUE model mm (DIMLFAC already applied, per view).",
   "input": {

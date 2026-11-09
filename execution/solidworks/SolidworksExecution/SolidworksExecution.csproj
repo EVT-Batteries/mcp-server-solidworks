@@ -39,6 +39,7 @@
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Net.Http.Formatting, Version=5.2.9.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.AspNet.WebApi.Client.5.2.9\lib\net45\System.Net.Http.Formatting.dll</HintPath>
@@ -98,6 +99,7 @@
     <Compile Include="Services\SolidWorksService.Analyze.cs" />
     <Compile Include="Services\SolidWorksService.Assembly.cs" />
     <Compile Include="Services\SolidWorksService.Measure.cs" />
+    <Compile Include="Services\SolidWorksService.Screenshot.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

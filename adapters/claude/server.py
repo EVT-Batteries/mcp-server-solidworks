@@ -994,6 +994,33 @@ def measure_curves(
 
 
 # ---------------------------------------------------------------------------
+# Tool: screenshot
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def screenshot(
+    file_path: str,
+    view: Literal["current", "isometric", "trimetric", "dimetric", "front", "back",
+                  "left", "right", "top", "bottom"] = "current",
+    zoom_to_fit: bool = True,
+    width: Annotated[int, Field(ge=0, le=8000)] = 0,
+    height: Annotated[int, Field(ge=0, le=8000)] = 0,
+    caption: str = "",
+) -> str:
+    """Save the active document's graphics view as a PNG image (does NOT change state).
+    Captures what the SolidWorks window shows (IModelDoc2.SaveBMP); the document file itself is
+    never written. Only the on-screen view changes: `view` switches to a standard orientation
+    first ('current' keeps the user's view), and zoom_to_fit fits the model in the window.
+    file_path: full output path ending in .png (folders are created).
+    width / height: image size in pixels; 0 = the window's size.
+    caption: optional text drawn in a white band under the image, one line per '\\n'; the first
+        line is bold (e.g. the part name, then its measurements from measure_curves).
+    The document's window must be visible: activate_document it first."""
+    return _call("screenshot", {"file_path": file_path, "view": view,
+                                "zoom_to_fit": zoom_to_fit, "width": width,
+                                "height": height, "caption": caption})
+
+
+# ---------------------------------------------------------------------------
 # Tool: analyze_drawing  (2026-07-27 — the SHIPPING drawing reader: DXF/DWG)
 # ---------------------------------------------------------------------------
 # The reader is a permanent module of the CAD-neutral planner layer (ADR-064): a drawing is design
