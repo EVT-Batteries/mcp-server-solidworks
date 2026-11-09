@@ -962,6 +962,38 @@ def analyze_model(
 
 
 # ---------------------------------------------------------------------------
+# Tool: measure_curves
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def measure_curves(
+    name: str = "",
+    include_2d: bool = False,
+    include_construction: bool = False,
+    per_segment: bool = False,
+) -> str:
+    """Measure curve LENGTHS in the active part or assembly (read-only, does NOT change state).
+    Reports every SWEEP (path sketch or edges, path length, profile sketch and, for a single-circle
+    profile such as a wire or cable, profile_diameter_m) and every 3D SKETCH (total length of its
+    non-construction segments, with count and length per segment kind: line / arc / spline /
+    ellipse / parabola). Lengths are true 3D arc lengths in meters (a spline is measured along the
+    curve), rounded to 6 decimals.
+    Active ASSEMBLY: measures its own sketches/sweeps (`root`) and every unsuppressed, resolved
+    component at every nesting level, one entry per distinct file + configuration with its
+    `instances`; `total_sweep_path_length_m` sums the sweep paths over all instances. Suppressed or
+    lightweight components are listed under `skipped`; an entry carries `warning` when the
+    component's document was measured in a configuration other than the referenced one.
+    name: only this sketch or sweep feature (exact tree name, e.g. '3DSketch1' or 'Sweep1');
+        a named 2D sketch is measured even without include_2d.
+    include_2d: also report 2D sketches (default: 3D sketches and sweeps only).
+    include_construction: count construction geometry in the totals (default: reported apart
+        as construction_length_m).
+    per_segment: also list each segment's kind and length."""
+    return _call("measure_curves", {"name": name, "include_2d": include_2d,
+                                    "include_construction": include_construction,
+                                    "per_segment": per_segment})
+
+
+# ---------------------------------------------------------------------------
 # Tool: analyze_drawing  (2026-07-27 — the SHIPPING drawing reader: DXF/DWG)
 # ---------------------------------------------------------------------------
 # The reader is a permanent module of the CAD-neutral planner layer (ADR-064): a drawing is design
