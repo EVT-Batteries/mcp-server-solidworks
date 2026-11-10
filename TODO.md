@@ -59,6 +59,24 @@ contract test passes (56 tools).
 - **Slow on large assemblies**: `component_status` with mates on a fully resolved sub-assembly of
   a ~1000-component assembly took over 10 minutes; the MCP adapter's timeout is shorter, so run
   such calls over HTTP (see the skill) or narrow them with `components`.
+- **Silent adapter errors.** When a call fails or times out, the MCP adapter often returns only
+  "Error executing tool <name>" with no code or message (seen on `insert_component`,
+  `component_status`, `activate_document`, `analyze_model(bodies)`). The same call over HTTP shows
+  the real error (e.g. `INSERT_FAILED`, `WRONG_DOCUMENT_TYPE`).
+- **`add_mate` reports COMPLETED for a mate SolidWorks rejects.** It returned `error_status=5`
+  (swAddMateError_e: over-defined assembly) with status COMPLETED, and left an ill-defined mate
+  that turned 16 other mates into warnings; only `check_rebuild` showed it.
+- **Instance names are not stable.** The same component was `Sub-1/dtm04-6p-2` while its
+  sub-assembly was lightweight and `Sub-1/dtm04-6p_Felix-2` once resolved (a Pack and Go copy).
+  Names taken from an earlier listing can stop resolving after a state change.
+- **STEP import.** `open_document` on a `.stp` gives an import document that `save_document`
+  writes as a `.SLDPRT` (reporting an empty path), but the open document stays the import (an
+  assembly-like tree with "Mates"): face queries fail with `WRONG_DOCUMENT_TYPE` until the saved
+  part is closed and reopened.
+- **Inconsistent parameter names.** `edit_feature` takes `feature_name`, other tools `name` or
+  `component`; a wrong name fails with MISSING_PARAMETER only.
+- **No interference or clearance check.** A route or service loop can be drawn through other
+  parts without any warning.
 
 ## Next improvements
 
@@ -69,7 +87,19 @@ Most useful first:
    the part / component index mismatch.
 2. **Insert a plug at a mating connector.** One tool that takes a plug model and a mating
    connector, finds both mating faces, inserts the plug flush on the header (or computes its
-   pose) and returns its wire-exit point.
+   pose) and returns its wire-exit point. Done by hand four times so far: read both models'
+   faces, screenshot both to tell the mating end and the latch side, build the plug-to-receptacle
+   rotation, chain it with the receptacle's world transform and the harness instance's inverse
+   (row-vector transforms), insert fixed, verify the world pose. The pose needs no mate (a rigid
+   harness located elsewhere cannot take one).
+2b. **Interference check.** Wrap `IAssemblyDoc.ToolsCheckInterference2` (or body-level
+   `IModeler.CheckInterference`) for a component against its neighbours, with a clearance, so
+   routes and service loops can be verified.
+2c. **Report mate failures.** `add_mate` should fail (and delete the mate) when SolidWorks
+   returns an add-mate error such as over-defined, naming the error, instead of COMPLETED.
+2d. **Surface errors in the adapter.** Pass the execution server's error code and message, and a
+   clear "timed out after N s" for timeouts, back through the MCP response; make the timeout
+   configurable per call for long assembly queries.
 3. **Route by named points.** Feed `create_3d_path` named points (a connection-point table), or
    anchor routes to sketch points or reference points on the connector components, so that
    moving a part updates its routes without redrawing.
@@ -78,10 +108,19 @@ Most useful first:
    existing contract test suite.
 5. **Lengths per instance.** `measure_curves` could report the sum along a chain of bundles
    (connector to connector), so wire lengths come out directly.
+5b. **Target length / service loop in `create_3d_path`.** A `target_length` option that inserts
+   a U loop of the depth needed (2d - 4r(2 - pi/2) added for four 90° bends of radius r) on a
+   chosen leg, so equal-length variants need no hand calculation.
+5c. **STEP import tool.** Open a STEP, save it as a part next to it, close the import and reopen
+   the part, returning its bodies and bounding box.
+5d. **Change report.** Compare a local copy against the released files (read-only) and list per
+   document the added / removed / suppressed components, changed transforms, mates and
+   configurations: the input for handing changes back to the CAD owner (building on
+   `compare_assemblies` / `compare_parts`).
 6. **Fast `check_rebuild` mode.** Report counts only and stop at the first error, for large
    assemblies.
 7. **Delete components and mates by name in one call**, and mark a mate as suppressed instead of
-   deleting it.
+   deleting it. Align parameter names across tools (`feature_name` / `name` / `component`).
 8. **Sub-assembly mates from the top.** Make `component_status` read mates held inside
    sub-assemblies without opening them (e.g. open the sub-assembly document invisibly, map its
    components to the top by ID chain), and speed up the mate scan (cache the mate list per

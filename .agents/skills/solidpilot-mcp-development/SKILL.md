@@ -140,7 +140,12 @@ Results are in `$r.cadState.features` (often one JSON string).
   (component-local coordinates). Single-body parts number their faces the same in both.
 - **STEP imports**: a multi-body STEP opens as an assembly; `save_document` to a `.sldprt` path
   saves it as a single-body (or multi-body) part. `analyze_model` needs that part, not the
-  assembly. Face queries on large imports (thousands of faces) take minutes: run them once, in the
+  assembly: close the import and reopen the saved `.sldprt` (the open document stays the import
+  after the save).
+- **Add-mate errors**: `AddMate5` returns a mate even when it reports an error through its
+  out-parameter (swAddMateError_e: 1 no error, 5 over-defined assembly, ...); check it, then
+  `check_rebuild`. A second set of mates on a rigid sub-assembly already located by mates
+  over-defines it even when the geometry agrees exactly. Face queries on large imports (thousands of faces) take minutes: run them once, in the
   background, and reuse the indices.
 - **Moving a sub-assembly up the tree**: read its world transform (`components_flat` of a part it
   contains at identity), delete it from the old parent (its mates go with it), insert it into the
