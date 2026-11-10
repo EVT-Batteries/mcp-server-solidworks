@@ -62,6 +62,9 @@ $sln = "<fork>\execution\solidworks\SolidworksExecution.sln"
 Get-Process SolidworksExecution -ErrorAction SilentlyContinue | Stop-Process   # it locks its exe
 & $msb $sln /t:Build /p:Configuration=Debug                     # into bin/Debug
 ```
+MSBuild ships with Visual Studio Build Tools; building needs the .NET Framework 4.8 targeting
+pack. The commands run from any directory. New or changed tools appear only after an MCP restart
+(the adapter does not hot-reload).
 After stopping it the server is down: call `ensure_ready` (or any MCP tool) before direct HTTP
 calls. `bin/Debug` is tracked in git despite `.gitignore`: commit the rebuilt `.exe` / `.pdb` with
 the source change (a rebuild may also refresh `SolidWorks.Interop.sldworks.dll` from the local
