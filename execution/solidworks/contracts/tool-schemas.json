@@ -406,6 +406,19 @@
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {sweep, action:'created'|'updated', diameter_m, path, path_length_m}."
  },
+ "place_component": {
+  "description": "Sets the transform (IComponent2.Transform2 from a 13-number array via IMathUtility.CreateTransform; a fixed component is unfixed to move it and fixed again unless fixed=false) and/or the fixed state (IAssemblyDoc.FixComponent / UnfixComponent on the selected component) of an existing component of the active assembly, found by Name2 among GetComponents(false). Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "component": "string (required — component instance name, Name2)",
+    "transform_json": "string (optional — JSON array of 13 numbers: 3x3 rotation row-major + translation xyz (m) + scale)",
+    "fixed": "boolean (optional — true fixes, false floats; omitted keeps the state)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {component, fixed, transform}."
+ },
  "screenshot": {
   "description": "Saves the active document's graphics view as a PNG (IModelDoc2.SaveBMP to a temporary BMP, converted with System.Drawing); the document file is never written. Optionally switches to a standard view orientation (IModelDoc2.ShowNamedView2 with swStandardViews_e) and zooms to fit first, and draws an optional caption band under the image. Changes only the on-screen view; does NOT increment state_version.",
   "input": {

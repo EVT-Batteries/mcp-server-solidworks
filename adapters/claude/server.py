@@ -239,6 +239,32 @@ def insert_component(
 
 
 # ---------------------------------------------------------------------------
+# Tool: place_component
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def place_component(
+    component: str,
+    transform_json: str = "[]",
+    fixed: bool | None = None,
+) -> str:
+    """Set the transform and/or the fixed state of an EXISTING component of the active assembly
+    (insert_component does this for a component it inserts). Bumps state_version.
+    component: the instance name (Name2) from analyze_assembly(components), e.g. 'Cable-1'.
+    transform_json: optional full placement, a JSON array STRING of 13 numbers (3x3 rotation
+        row-major + translation xyz in meters + scale), as analyze_assembly reports it;
+        '[1,0,0,0,1,0,0,0,1,0,0,0,1]' puts the part's origin on the assembly's. A fixed component
+        is unfixed to move it and fixed again unless fixed=False.
+    fixed: True fixes the component where it is (or where transform_json puts it), False floats
+        it; omit to keep its state.
+    Mates driving a component still win on rebuild: delete or suppress them to place it freely.
+    Returns the component's fixed state and transform."""
+    params: dict = {"component": component, "transform_json": transform_json}
+    if fixed is not None:
+        params["fixed"] = fixed
+    return _call("place_component", params)
+
+
+# ---------------------------------------------------------------------------
 # Tool: add_mate  (Phase B build tool, ADR-047 B3)
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)

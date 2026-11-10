@@ -173,6 +173,7 @@ namespace SolidworksExecution.Controllers
                 case "screenshot":             return _service.Screenshot(request);
                 case "create_3d_path":         return _service.CreatePath3D(request);
                 case "sweep_circular":         return _service.SweepCircular(request);
+                case "place_component":        return _service.PlaceComponent(request);
                 case "analyze_slddrw_test":    return _service.AnalyzeDrawing(request);
                 case "get_selection":          return _service.GetSelection(request);
                 case "edit_sketch":            return _service.EditSketch(request);
