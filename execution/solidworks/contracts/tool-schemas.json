@@ -406,6 +406,19 @@
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {sweep, action:'created'|'updated', diameter_m, path, path_length_m}."
  },
+ "check_rebuild": {
+  "description": "Reports SolidWorks' What's Wrong list (IModelDocExtension.GetWhatsWrong: features, swFeatureError_e codes, warning flags) for the active document and, recursively in an assembly, for every distinct loaded component document (IAssemblyDoc.GetComponents(false), unsuppressed, GetModelDoc2). For mates, lists the component instance path each IMate2.MateEntity references (null when gone). Optionally ForceRebuild3 first. Never saves; does NOT increment state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "rebuild": "boolean (optional, default true — force-rebuild the active document first)",
+    "recursive": "boolean (optional, default true — also check every loaded component document)",
+    "include_warnings": "boolean (optional, default true)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, documents_checked, errors, warnings, clean, problems:[{document, path, first_instance?, items:[{severity, feature, type, code, meaning, mate_components?}]}], components_not_loaded?:[{component, path}]}."
+ },
  "place_component": {
   "description": "Sets the transform (IComponent2.Transform2 from a 13-number array via IMathUtility.CreateTransform; a fixed component is unfixed to move it and fixed again unless fixed=false) and/or the fixed state (IAssemblyDoc.FixComponent / UnfixComponent on the selected component) of an existing component of the active assembly, found by Name2 among GetComponents(false). Increments state_version.",
   "input": {

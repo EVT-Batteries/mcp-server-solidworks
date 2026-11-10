@@ -219,8 +219,8 @@ def insert_component(
     fixed: bool = False,
     transform_json: str = "[]",
 ) -> str:
-    """Insert a part file as a component of the ACTIVE assembly (open_new_assembly first).
-    file_path: the .SLDPRT to insert (meters for all coordinates).
+    """Insert a part or sub-assembly file as a component of the ACTIVE assembly (open_new_assembly first).
+    file_path: the .SLDPRT or .SLDASM to insert (meters for all coordinates).
     x/y/z: insertion point — used when transform_json is not given. SolidWorks puts the part's
         BOUNDING-BOX CENTRE there, not its origin; to place the part origin exactly (e.g. parts
         modelled in the assembly's coordinates), pass transform_json='[1,0,0,0,1,0,0,0,1,0,0,0,1]'.
@@ -236,6 +236,29 @@ def insert_component(
     if transform_json and transform_json != "[]":
         params["transform_json"] = transform_json
     return _call("insert_component", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: check_rebuild
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def check_rebuild(
+    rebuild: bool = True,
+    recursive: bool = True,
+    include_warnings: bool = True,
+) -> str:
+    """SolidWorks' "What's Wrong" list for the active document (does NOT change state_version;
+    never saves). rebuild=True force-rebuilds the active document first, so the list is current.
+    In an assembly with recursive=True, every loaded sub-assembly and part document is checked too
+    (each distinct file once, with `first_instance` = one instance path that uses it).
+    Each problem gives severity (error / warning), the feature or mate name and type, the
+    swFeatureError_e code and its meaning, and for a mate `mate_components`: the instance path of
+    each component it references (null = that reference is gone). `components_not_loaded` lists
+    unsuppressed components whose file could not be loaded. `clean` is true when nothing is wrong.
+    Run it after every structural change (deleted features, moved or replaced components) and
+    before saving an assembly."""
+    return _call("check_rebuild", {"rebuild": rebuild, "recursive": recursive,
+                                   "include_warnings": include_warnings})
 
 
 # ---------------------------------------------------------------------------

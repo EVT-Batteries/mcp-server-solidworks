@@ -92,6 +92,11 @@ Results are in `$r.cadState.features` (often one JSON string).
   must equal the length computed from its points (`create_3d_path` reports both); compare
   `measure_curves` / `analyze_model` before and after an edit.
 - `screenshot(view=..., caption=...)` and read the PNG to inspect the result.
+- After any structural change in an assembly (deleted features, moved, replaced or removed
+  components) run `check_rebuild` on the top assembly: it reports every rebuild error and warning
+  in every loaded sub-assembly and part, and for a broken mate the components it references.
+  Fix, re-check, and only then save. Mates of a deleted component are deleted with it; mates whose
+  geometry changed stay behind as errors (code 48 "broken") and must be deleted or re-made.
 
 ## SolidWorks API lessons
 
@@ -119,9 +124,27 @@ Results are in `$r.cadState.features` (often one JSON string).
   `measure_curves(include_geometry=True)` for 3D.
 - **Deleting a body's base feature** (e.g. a sweep) deletes every feature merged into that body.
 - **Inserting components**: `x/y/z` place the part's bounding-box centre; pass an identity
-  `transform_json` to put the part origin on the assembly origin. Mates referencing deleted
-  geometry show as errors in "What's Wrong": delete them and fix the component
+  `transform_json` to put the part origin on the assembly origin. A `.sldasm` is preloaded as an
+  assembly (`OpenDoc6` with `swDocASSEMBLY`), so sub-assemblies insert too. Mates referencing
+  deleted geometry show as errors in "What's Wrong": delete them and fix the component
   (`place_component`).
+- **Nested components**: `add_mate`, `analyze_assembly(faces|edges)` and `place_component` accept
+  a component inside a sub-assembly by its instance path from the active assembly
+  (`Sub-1/Part-1`, as `components_flat` and `check_rebuild` print it), so a top-level mate can tie
+  parts of two different sub-assemblies.
+- **Face indices differ between a multi-body part and its component**: `analyze_model(faces)` on
+  the part and `analyze_assembly(faces, component)` enumerate bodies in different orders when a
+  part has several bodies (an imported board with its connector models), so an index read on the
+  part document selects another face in the assembly. Always take mate indices from
+  `analyze_assembly(faces, component=...)` and identify the face there by normal, area and point
+  (component-local coordinates). Single-body parts number their faces the same in both.
+- **STEP imports**: a multi-body STEP opens as an assembly; `save_document` to a `.sldprt` path
+  saves it as a single-body (or multi-body) part. `analyze_model` needs that part, not the
+  assembly. Face queries on large imports (thousands of faces) take minutes: run them once, in the
+  background, and reuse the indices.
+- **Moving a sub-assembly up the tree**: read its world transform (`components_flat` of a part it
+  contains at identity), delete it from the old parent (its mates go with it), insert it into the
+  new parent with that `transform_json`, then mate it; `check_rebuild` every assembly touched.
 - **Screenshots**: `IModelDoc2.SaveBMP(path, w, h)` captures the document window (it must be
   visible: activate it first); it never writes the document.
 

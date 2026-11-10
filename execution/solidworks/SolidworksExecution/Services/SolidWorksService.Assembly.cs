@@ -126,12 +126,26 @@ namespace SolidworksExecution.Services
         private IComponent2 FindComponentByName(IAssemblyDoc asm, string name)
         {
             object[] comps = asm.GetComponents(true) as object[];
-            if (comps == null) return null;
-            foreach (var c in comps)
+            if (comps != null)
             {
-                var comp = c as IComponent2;
-                if (comp == null) continue;
-                if (string.Equals(comp.Name2, name, StringComparison.OrdinalIgnoreCase)) return comp;
+                foreach (var c in comps)
+                {
+                    var comp = c as IComponent2;
+                    if (comp == null) continue;
+                    if (string.Equals(comp.Name2, name, StringComparison.OrdinalIgnoreCase)) return comp;
+                }
+            }
+            // A component inside a sub-assembly, by its instance path from this assembly
+            // ("Sub-1/Part-1", as analyze_assembly(components_flat) and check_rebuild name it).
+            if (name != null && name.Contains("/") && asm.GetComponents(false) is object[] all)
+            {
+                foreach (var c in all)
+                {
+                    var comp = c as IComponent2;
+                    if (comp == null) continue;
+                    if (string.Equals(comp.Name2, name, StringComparison.OrdinalIgnoreCase)) return comp;
+                    if (string.Equals(ComponentPath(comp), name, StringComparison.OrdinalIgnoreCase)) return comp;
+                }
             }
             return null;
         }
@@ -666,7 +680,10 @@ namespace SolidworksExecution.Services
                 // Preload the component document (required by AddComponent5), then restore the
                 // assembly as active — OpenDoc6 activates what it opens.
                 int e1 = 0, w1 = 0;
-                var partDoc = _solidWorks.OpenDoc6(filePath, (int)swDocumentTypes_e.swDocPART,
+                // A sub-assembly (.sldasm) is preloaded as an assembly, everything else as a part.
+                int preloadType = filePath.EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase)
+                    ? (int)swDocumentTypes_e.swDocASSEMBLY : (int)swDocumentTypes_e.swDocPART;
+                var partDoc = _solidWorks.OpenDoc6(filePath, preloadType,
                     (int)swOpenDocOptions_e.swOpenDocOptions_Silent, "", ref e1, ref w1) as IModelDoc2;
                 if (partDoc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),

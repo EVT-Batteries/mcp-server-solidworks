@@ -102,6 +102,7 @@
     <Compile Include="Services\SolidWorksService.Screenshot.cs" />
     <Compile Include="Services\SolidWorksService.Path3D.cs" />
     <Compile Include="Services\SolidWorksService.Placement.cs" />
+    <Compile Include="Services\SolidWorksService.Health.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>
