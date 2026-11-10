@@ -372,10 +372,39 @@
     "name": "string (optional — only this sketch or sweep feature, exact tree name; a named 2D sketch is measured even without include_2d)",
     "include_2d": "boolean (optional, default false — also report 2D sketches)",
     "include_construction": "boolean (optional, default false — count construction geometry in the totals instead of reporting it apart as construction_length_m)",
-    "per_segment": "boolean (optional, default false — also list every segment's {kind, length_m, construction})"
+    "per_segment": "boolean (optional, default false — also list every segment's {kind, length_m, construction})",
+    "include_geometry": "boolean (optional, default false; implies per_segment — each segment also carries start/end [x,y,z], center + radius for arcs, through-points for splines, in meters; part model coordinates, or assembly coordinates (component Transform2 applied) when the active document is an assembly)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string. Part: {document, units:'m', sweeps:[{name, type, suppressed?, profile?, profile_diameter_m?, path, path_length_m, path_segments?, path_edge_count?, path_type?, per_segment?, warning?}], sweep_path_length_m, sketches:[{name, kind:'3d'|'2d', suppressed?, length_m, segments:{<kind>:{count, length_m}}, construction_length_m?, per_segment?}]}. Assembly: {document, units, root:{sweeps, sweep_path_length_m, sketches}, components:[{path, config, instances[], warning?, sweeps, sweep_path_length_m, sketches}], total_sweep_path_length_m (summed over all instances), skipped?:[{name, reason}]}; components with no sweep or reported sketch are omitted."
+ },
+ "create_3d_path": {
+  "description": "Creates or redraws a 3D sketch path in the active part from XYZ points (SketchManager.Insert3DSketch, or EditSketch on an existing 3DProfileFeature whose segments are deleted first), with AddToDB on (exact coordinates, no inference). kind='polyline': CreateLine legs with every corner rounded by an exact tangent Create3PointArc of bend_radius (reduced with a warning where the legs are too short); kind='spline': CreateSpline2 through the points. Redrawing keeps the feature, so a sweep using it follows after the rebuild. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "points": "string (required — JSON array of [x,y,z] in meters, part model coordinates, >= 2 points, no two consecutive equal)",
+    "bend_radius": "number (optional, default 0 — polyline corner radius in meters; 0 = sharp corners)",
+    "kind": "string (optional, default 'polyline' — 'polyline' or 'spline')",
+    "sketch_name": "string (optional — an existing 3D sketch to redraw in place; a new name names the new sketch)",
+    "bend_radii": "string (optional — JSON array, one radius per corner (len(points)-2 values, meters, 0 = sharp), overriding bend_radius; bends sharing a leg too short for both are scaled down together with a warning)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {sketch, action:'created'|'redrawn', kind, deleted_segments?, length_m, segments:{<kind>:{count,length_m}}, per_segment:[{kind, length_m, construction, start, end, center?, radius?, points?}], warnings?}."
+ },
+ "sweep_circular": {
+  "description": "Creates a circular-profile sweep (FeatureManager.CreateDefinition(swFmSweep=17) as ISweepFeatureData with CircularProfile=true and CircularProfileDiameter; path = the named sketch, selected with mark 4) in the active part, or, when `name` is an existing circular-profile sweep, changes its diameter (AccessSelections + ModifyDefinition). Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "diameter": "number (required — profile diameter in meters, > 0)",
+    "path_sketch": "string (required to create — the 2D or 3D path sketch name)",
+    "name": "string (optional — names the new sweep; an existing circular-profile sweep of this name gets the new diameter instead)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {sweep, action:'created'|'updated', diameter_m, path, path_length_m}."
  },
  "screenshot": {
   "description": "Saves the active document's graphics view as a PNG (IModelDoc2.SaveBMP to a temporary BMP, converted with System.Drawing); the document file is never written. Optionally switches to a standard view orientation (IModelDoc2.ShowNamedView2 with swStandardViews_e) and zooms to fit first, and draws an optional caption band under the image. Changes only the on-screen view; does NOT increment state_version.",

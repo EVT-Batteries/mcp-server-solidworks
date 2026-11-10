@@ -32,6 +32,8 @@ namespace SolidworksExecution.Services
             public bool Include2D;           // also report 2D sketches (default: 3D sketches + sweeps)
             public bool IncludeConstruction; // add construction geometry to the totals
             public bool PerSegment;          // list every segment's kind + length
+            public bool IncludeGeometry;     // per segment: 3D start / end / center / spline points
+            public IMathTransform Frame;     // component -> assembly transform while measuring a component
         }
 
         public ExecutionResponse MeasureCurves(ToolRequest request)
@@ -56,7 +58,9 @@ namespace SolidworksExecution.Services
                     Include2D = p?.Value<bool?>("include_2d") ?? false,
                     IncludeConstruction = p?.Value<bool?>("include_construction") ?? false,
                     PerSegment = p?.Value<bool?>("per_segment") ?? false,
+                    IncludeGeometry = p?.Value<bool?>("include_geometry") ?? false,
                 };
+                if (opt.IncludeGeometry) opt.PerSegment = true;
 
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 if (modelDoc == null)
@@ -71,6 +75,10 @@ namespace SolidworksExecution.Services
                 var result = new JObject();
                 result["document"] = modelDoc.GetTitle();
                 result["units"] = "m";
+                if (opt.IncludeGeometry)
+                    result["frame"] = docType == (int)swDocumentTypes_e.swDocPART
+                        ? "part model coordinates"
+                        : "assembly coordinates (component transforms applied)";
 
                 if (docType == (int)swDocumentTypes_e.swDocPART)
                 {
@@ -163,7 +171,10 @@ namespace SolidworksExecution.Services
                                            $"not the referenced '{refConfig}'";
                     entry["instances"] = new JArray(name);
 
-                    var measured = MeasureDocument(doc, opt);
+                    try { opt.Frame = opt.IncludeGeometry ? comp.Transform2 as IMathTransform : null; } catch { opt.Frame = null; }
+                    JObject measured;
+                    try { measured = MeasureDocument(doc, opt); }
+                    finally { opt.Frame = null; }
                     bool hasContent = ((JArray)measured["sketches"]).Count > 0 || ((JArray)measured["sweeps"]).Count > 0;
                     if (!hasContent) continue;
                     foreach (var prop in measured.Properties()) entry[prop.Name] = prop.Value;
@@ -238,6 +249,15 @@ namespace SolidworksExecution.Services
                 {
                     try { path = def.Path; } catch { }
                     try { profile = def.Profile; } catch { }
+                    try
+                    {
+                        if (def.CircularProfile)
+                        {
+                            sj["profile"] = "circular";
+                            sj["profile_diameter_m"] = Math.Round(def.CircularProfileDiameter, 6);
+                        }
+                    }
+                    catch { }
                 }
             }
             finally
@@ -318,12 +338,16 @@ namespace SolidworksExecution.Services
                     try { len = seg.GetLength(); } catch { }
 
                     if (perSeg != null)
-                        perSeg.Add(new JObject
+                    {
+                        var sj = new JObject
                         {
                             ["kind"] = kind,
                             ["length_m"] = Math.Round(len, 6),
                             ["construction"] = isConstr,
-                        });
+                        };
+                        if (opt.IncludeGeometry) AddSegmentGeometry(sj, sketch, seg, opt.Frame);
+                        perSeg.Add(sj);
+                    }
 
                     if (isConstr && !opt.IncludeConstruction) { construction += len; continue; }
                     total += len;
@@ -341,6 +365,62 @@ namespace SolidworksExecution.Services
             if (!opt.IncludeConstruction && construction > 0) j["construction_length_m"] = Math.Round(construction, 6);
             if (perSeg != null) j["per_segment"] = perSeg;
             return j;
+        }
+
+        // Segment geometry in model coordinates (a 2D sketch's points are mapped out of the sketch
+        // plane), then into assembly coordinates when `frame` (a component transform) is given.
+        private void AddSegmentGeometry(JObject sj, ISketch sketch, ISketchSegment seg, IMathTransform frame)
+        {
+            try
+            {
+                IMathTransform sketchToModel = null;
+                bool is3D = false;
+                try { is3D = sketch.Is3D(); } catch { }
+                if (!is3D)
+                {
+                    try { sketchToModel = sketch.ModelToSketchTransform?.Inverse() as IMathTransform; } catch { }
+                }
+
+                if (seg is ISketchLine line)
+                {
+                    sj["start"] = PointArray(line.GetStartPoint2() as ISketchPoint, sketchToModel, frame);
+                    sj["end"] = PointArray(line.GetEndPoint2() as ISketchPoint, sketchToModel, frame);
+                }
+                else if (seg is ISketchArc arc)
+                {
+                    sj["start"] = PointArray(arc.GetStartPoint2() as ISketchPoint, sketchToModel, frame);
+                    sj["end"] = PointArray(arc.GetEndPoint2() as ISketchPoint, sketchToModel, frame);
+                    sj["center"] = PointArray(arc.GetCenterPoint2() as ISketchPoint, sketchToModel, frame);
+                    sj["radius"] = Math.Round(arc.GetRadius(), 6);
+                }
+                else if (seg is ISketchSpline spline)
+                {
+                    var pts = new JArray();
+                    if (spline.GetPoints2() is object[] arr)
+                        foreach (var o in arr) pts.Add(PointArray(o as ISketchPoint, sketchToModel, frame));
+                    sj["points"] = pts;
+                    if (pts.Count > 0) { sj["start"] = pts[0]; sj["end"] = pts[pts.Count - 1]; }
+                }
+            }
+            catch { /* geometry is best effort; the length is already recorded */ }
+        }
+
+        private JArray PointArray(ISketchPoint sp, IMathTransform sketchToModel, IMathTransform frame)
+        {
+            if (sp == null) return null;
+            double[] v = { sp.X, sp.Y, sp.Z };
+            if (sketchToModel != null || frame != null)
+            {
+                var mu = _solidWorks.GetMathUtility() as IMathUtility;
+                var mp = mu?.CreatePoint(v) as IMathPoint;
+                if (mp != null)
+                {
+                    if (sketchToModel != null) mp = mp.MultiplyTransform(sketchToModel) as IMathPoint;
+                    if (frame != null) mp = mp.MultiplyTransform(frame) as IMathPoint;
+                    if (mp?.ArrayData is double[] d && d.Length >= 3) v = new[] { d[0], d[1], d[2] };
+                }
+            }
+            return new JArray(Math.Round(v[0], 6), Math.Round(v[1], 6), Math.Round(v[2], 6));
         }
 
         private static double EdgeLength(IEdge edge)

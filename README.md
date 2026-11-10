@@ -104,7 +104,7 @@ The `adapters/` layer is provider-specific and replaceable. Because the executio
 
 ## Tool List
 
-The system currently exposes **49 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
+The system currently exposes **51 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
 
 The **resources** carry the rule set and the contracts, not behaviour: `recipe://usage/index` plus one static `recipe://usage/<section>` per rule section, and `schema://feature-graph` + `schema://analysis-artifact`. The split is deliberate — a tool's description is paid on every single turn whether or not it is used, while a resource body costs only when read, so near-static reference material belongs on the resource side.
 
@@ -122,9 +122,11 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `add_sketch_entity` — adds a sketch entity: line, circle, arc, center arc, ellipse, spline, rectangle, fillet, chamfer.
 - `add_sketch_constraint` — adds a sketch relation (horizontal, coincident, etc.).
 - `add_dimension` — adds a dimension to the sketch.
+- `create_3d_path` — creates a 3D sketch route from XYZ points (polyline with per-corner tangent bend radii, or spline), or redraws an existing one in place so the sweep built on it follows (cables, wire bundles, tubes).
 
 ### Feature and solid modeling
 - `extrude_feature` — boss, cut, revolve, sweep, loft.
+- `sweep_circular` — circular-profile sweep of a given diameter along a path sketch (no profile sketch needed); re-running it on an existing sweep changes the diameter.
 - `add_edge_feature` — fillet or chamfer on a solid edge (chamfer: distance-angle at any angle, or distance-distance).
 - `create_rib` — rib feature from an open sketch profile.
 - `add_reference_geometry` — reference plane, axis, or point.
@@ -141,7 +143,7 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 ### Analysis and query
 - `analyze_model` — `geometry`, `mass_properties`, `bodies` (per-body fingerprints for multibody parts), `features` (a compact feature-level recipe), `edges`, `faces`, `sketch` (one sketch's exact segments on demand), and `feature_map` (per-feature consumed/created topology — the source of the reference-resolver anchors) modes.
 - `get_selection` — reads the geometry the user selected in the SolidWorks GUI and maps it to the analyze index.
-- `measure_curves` — true 3D lengths of sweep paths and 3D sketches (lines, arcs, splines), in a part or across every component of an assembly (e.g. cable and wire lengths).
+- `measure_curves` — true 3D lengths of sweep paths and 3D sketches (lines, arcs, splines), in a part or across every component of an assembly (e.g. cable and wire lengths); `include_geometry` adds each segment's 3D points (assembly coordinates in an assembly).
 - `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit and a caption band); the document file is never written.
 - `verify_state` — returns the current state and feature tree.
 

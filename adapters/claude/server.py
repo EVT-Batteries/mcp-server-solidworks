@@ -221,7 +221,9 @@ def insert_component(
 ) -> str:
     """Insert a part file as a component of the ACTIVE assembly (open_new_assembly first).
     file_path: the .SLDPRT to insert (meters for all coordinates).
-    x/y/z: insertion point — used when transform_json is not given.
+    x/y/z: insertion point — used when transform_json is not given. SolidWorks puts the part's
+        BOUNDING-BOX CENTRE there, not its origin; to place the part origin exactly (e.g. parts
+        modelled in the assembly's coordinates), pass transform_json='[1,0,0,0,1,0,0,0,1,0,0,0,1]'.
     transform_json: OPTIONAL full placement as a JSON array STRING of 13 numbers
         (3x3 rotation row-major + translation xyz + scale — exactly the layout
         analyze_assembly(components) reports). Needed for rotated placements.
@@ -970,6 +972,7 @@ def measure_curves(
     include_2d: bool = False,
     include_construction: bool = False,
     per_segment: bool = False,
+    include_geometry: bool = False,
 ) -> str:
     """Measure curve LENGTHS in the active part or assembly (read-only, does NOT change state).
     Reports every SWEEP (path sketch or edges, path length, profile sketch and, for a single-circle
@@ -987,10 +990,69 @@ def measure_curves(
     include_2d: also report 2D sketches (default: 3D sketches and sweeps only).
     include_construction: count construction geometry in the totals (default: reported apart
         as construction_length_m).
-    per_segment: also list each segment's kind and length."""
+    per_segment: also list each segment's kind and length.
+    include_geometry: per segment (implies per_segment) also its 3D geometry in meters: start /
+        end, center + radius for arcs, through-points for splines. Coordinates are the part's
+        model coordinates, or ASSEMBLY coordinates (component transform applied) when the active
+        document is an assembly — read a route here, edit it, and redraw it with create_3d_path."""
     return _call("measure_curves", {"name": name, "include_2d": include_2d,
                                     "include_construction": include_construction,
-                                    "per_segment": per_segment})
+                                    "per_segment": per_segment,
+                                    "include_geometry": include_geometry})
+
+
+# ---------------------------------------------------------------------------
+# Tool: create_3d_path
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def create_3d_path(
+    points: str,
+    bend_radius: Annotated[float, Field(ge=0)] = 0.0,
+    kind: Literal["polyline", "spline"] = "polyline",
+    sketch_name: str = "",
+    bend_radii: str = "[]",
+) -> str:
+    """Create or REDRAW a 3D sketch path in the active PART from XYZ points (cable, wire bundle,
+    tube or rod routes). Bumps state_version.
+    points: JSON array STRING of [x,y,z] points in METERS, in the part's model coordinates
+        (for a part placed at an assembly's origin with no rotation, these are the assembly's
+        coordinates), e.g. '[[0,0,0],[0.1,0,0],[0.1,0.05,0.02]]'.
+    kind='polyline': straight legs between the points; with bend_radius > 0 every corner is
+        rounded with an exact tangent arc of that radius (where two bends share a leg too short
+        for both, both are reduced, with a warning). kind='spline': a smooth spline through the
+        points (radii ignored).
+    bend_radii: optional JSON array STRING with one radius per corner (len(points) - 2 values,
+        meters, 0 = sharp), overriding bend_radius corner by corner, e.g. '[0.04,0.025,0.025]'.
+    sketch_name: the name of an EXISTING 3D sketch to redraw in place (its old segments, with
+        their dimensions and relations, are deleted and the new route drawn in the same feature,
+        so a sweep built on it follows after the rebuild) — use this to update a route when the
+        parts it connects move. A name that does not exist yet names the new sketch.
+    Points are entered exactly (no snapping, no automatic relations). Returns the sketch name,
+    its length and each segment's geometry; sweep it with sweep_circular."""
+    return _call("create_3d_path", {"points": points, "bend_radius": bend_radius,
+                                    "kind": kind, "sketch_name": sketch_name,
+                                    "bend_radii": bend_radii})
+
+
+# ---------------------------------------------------------------------------
+# Tool: sweep_circular
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def sweep_circular(
+    diameter: Annotated[float, Field(gt=0)],
+    path_sketch: str = "",
+    name: str = "",
+) -> str:
+    """Sweep a CIRCULAR profile of `diameter` (METERS) along a path sketch in the active PART
+    (SolidWorks' circular-profile sweep: no profile sketch or plane needed, any 3D start
+    direction works). Bumps state_version.
+    path_sketch: the 2D or 3D sketch holding the path (e.g. from create_3d_path); required to
+        create a new sweep.
+    name: names the new sweep; if a circular-profile sweep with this name already exists, its
+        diameter is changed instead (path_sketch ignored). To move the route, redraw its path
+        sketch with create_3d_path(sketch_name=...) — the sweep follows.
+    Returns the sweep name, diameter and path length."""
+    return _call("sweep_circular", {"diameter": diameter, "path_sketch": path_sketch, "name": name})
 
 
 # ---------------------------------------------------------------------------

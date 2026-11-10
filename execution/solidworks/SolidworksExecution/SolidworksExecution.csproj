@@ -100,6 +100,7 @@
     <Compile Include="Services\SolidWorksService.Assembly.cs" />
     <Compile Include="Services\SolidWorksService.Measure.cs" />
     <Compile Include="Services\SolidWorksService.Screenshot.cs" />
+    <Compile Include="Services\SolidWorksService.Path3D.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

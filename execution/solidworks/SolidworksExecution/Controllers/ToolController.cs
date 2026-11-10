@@ -171,6 +171,8 @@ namespace SolidworksExecution.Controllers
                 case "analyze_model":          return _service.AnalyzeModel(request);
                 case "measure_curves":         return _service.MeasureCurves(request);
                 case "screenshot":             return _service.Screenshot(request);
+                case "create_3d_path":         return _service.CreatePath3D(request);
+                case "sweep_circular":         return _service.SweepCircular(request);
                 case "analyze_slddrw_test":    return _service.AnalyzeDrawing(request);
                 case "get_selection":          return _service.GetSelection(request);
                 case "edit_sketch":            return _service.EditSketch(request);
