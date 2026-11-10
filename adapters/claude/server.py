@@ -262,6 +262,103 @@ def check_rebuild(
 
 
 # ---------------------------------------------------------------------------
+# Tool: component_status
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def component_status(
+    components: str = "[]",
+    match: str = "",
+    state: str = "",
+    recursive: bool = True,
+    include_mates: bool | None = None,
+    limit: int = 500,
+) -> str:
+    """Read-only status of the active assembly's components (does NOT change state_version).
+    components: JSON list of component names or instance paths ("Sub-1/Part-1", nested ones
+    included); when empty, every component (recursive=False: top level only) is listed, filtered by
+    `match` (substring of the instance path or file path) and `state` ('suppressed', 'lightweight',
+    'resolved', 'hidden' or 'missing' = file not found). Each entry: component (instance path),
+    suppression (suppressed / lightweight / resolved / fully_resolved), file, file_missing,
+    configuration, hidden, fixed, envelope, parent_suppressed (a suppressed sub-assembly holding it),
+    excluded_from_bom, transform (13 numbers, m), and with include_mates (default: on when the list is
+    named or filtered) its mates: name, type, suppressed, severity / code / meaning when the mate has a
+    rebuild error, and the instance paths of the components it references (null = reference gone);
+    broken_mates counts the errors. counts_by_state summarizes a full listing. Use it to find
+    suppressed parts and what they are mated to before set_component_state.
+    Limits: from the top assembly, mates are found reliably only when held by the ACTIVE
+    assembly (e.g. top-level mates to nested parts); to see the mates a sub-assembly holds, open
+    that sub-assembly and run component_status there. `fixed` is reliable for components of the
+    active assembly itself (open the sub-assembly for its own components)."""
+    params: dict = {"components": components, "match": match, "state": state,
+                    "recursive": recursive, "limit": limit}
+    if include_mates is not None:
+        params["include_mates"] = include_mates
+    return _call("component_status", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: set_component_state
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def set_component_state(
+    components: str,
+    suppression: str = "",
+    visible: bool | None = None,
+    referenced_configuration: str = "",
+) -> str:
+    """Suppresses, resolves (unsuppresses) or makes lightweight components of the active assembly,
+    shows or hides them, and / or sets which configuration of their file they use
+    (IComponent2.SetSuppression2, Visible, ReferencedConfiguration). All of it applies to the
+    assembly's ACTIVE configuration only (manage_configurations switches it). Increments
+    state_version; does NOT save. components: JSON list of names or instance paths
+    ("Sub-1/Part-1"); if any is not found nothing changes. suppression: 'suppressed', 'resolved'
+    (= unsuppress), 'lightweight' or 'fully_resolved'; visible: true shows, false hides;
+    referenced_configuration: a configuration name of the component's own file. A component inside
+    a suppressed sub-assembly fails until that sub-assembly is resolved (resolve the parent first).
+    Changing a nested component edits its sub-assembly's active configuration, so that
+    sub-assembly file is modified too: work on local copies only. Rebuilds, then returns per
+    component the change result (ok / failed / bad_state) and its status after the rebuild with its
+    mates and their errors (as component_status). Run check_rebuild before saving."""
+    params: dict = {"components": components, "suppression": suppression}
+    if visible is not None:
+        params["visible"] = visible
+    if referenced_configuration:
+        params["referenced_configuration"] = referenced_configuration
+    return _call("set_component_state", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: manage_configurations
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def manage_configurations(
+    action: str = "list",
+    name: str = "",
+    new_name: str = "",
+    description: str = "",
+    activate: bool = True,
+    suppress_new_components: bool | None = None,
+) -> str:
+    """Lists or changes the configurations of the active part or assembly. action: 'list'
+    (read-only, does NOT change state_version), 'add' (a copy of the active configuration, made
+    active unless activate=False), 'activate', 'rename' (name -> new_name), 'delete' (not the active
+    one) or 'set' (description / suppress_new_components of `name`, default the active one).
+    suppress_new_components=True makes components inserted later in another configuration
+    arrive suppressed in this one. Changing actions increment state_version and do NOT save.
+    Returns the configurations (name, active, description, parent, suppress_new_components).
+    Variants of one assembly (e.g. left / right hand) are configurations: switch with 'activate',
+    then suppress or resolve components with set_component_state, and point a sub-assembly
+    instance at a configuration with set_component_state(referenced_configuration)."""
+    params: dict = {"action": action, "name": name, "new_name": new_name,
+                    "activate": activate}
+    if description:
+        params["description"] = description
+    if suppress_new_components is not None:
+        params["suppress_new_components"] = suppress_new_components
+    return _call("manage_configurations", params)
+
+
+# ---------------------------------------------------------------------------
 # Tool: place_component
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)

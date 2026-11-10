@@ -15,15 +15,19 @@ build steps and API lessons: [`.agents/skills/solidpilot-mcp-development/SKILL.m
 | `sweep_circular` | Circular-profile sweep of a diameter along a path sketch. Re-running it on an existing sweep changes its diameter. |
 | `place_component` | Sets an existing component's transform and fixed state. |
 | `check_rebuild` | SolidWorks' "What's Wrong" for the active document and every loaded sub-assembly and part. For each error or warning: the code and its meaning, and for a broken mate, the components it references. |
+| `component_status` | Read-only status of components, nested ones by instance path: suppressed / lightweight / resolved, hidden, fixed, missing file, suppressed parent, referenced configuration, transform, and the mates referencing them with their errors. Filters by path substring and state. |
+| `set_component_state` | Suppresses, resolves or makes lightweight components, shows or hides them, and sets the configuration they reference, in the active configuration; returns their status and mates after the rebuild. |
+| `manage_configurations` | Lists, adds, activates, renames or deletes configurations, and sets their description and "suppress new components". |
 
 Changes to upstream tools:
 - `insert_component` also inserts sub-assemblies (`.sldasm`). Its description now says that
-  x / y / z place the part's bounding-box centre, not its origin.
+  x / y / z place the part's bounding-box centre, not its origin. It normalizes the file path
+  (AddComponent5 returned null for `C:/dir/part.sldprt` when the part was not loaded).
 - `add_mate`, `analyze_assembly(faces|edges)` and `place_component` find components inside
   sub-assemblies by instance path (`Sub-1/Part-1`).
 
 Each tool is registered in the contract (`tool-schemas.json`), the adapter and the README, and the
-contract test passes (53 tools).
+contract test passes (56 tools).
 
 ## Known limits
 
@@ -42,6 +46,19 @@ contract test passes (53 tools).
   one sketch, and it adds no dimensions or relations: a redrawn route is not parametric.
 - **`check_rebuild` skips suppressed components.** It cannot check them, because they are not
   loaded.
+- **Mates held by a sub-assembly are not seen from the top.** `component_status` finds the mates
+  of the active assembly (including top-level mates to nested parts), but walking a
+  sub-assembly's mate group through the component (`IComponent2.FirstFeature`) returned none,
+  even when resolved; opening the sub-assembly works. Inside the sub-assembly's own tree the
+  instance names can also differ from the names the top shows (seen after Pack and Go:
+  `dtm04-6p_Felix-5` vs `dtm04-6p-1`), so the tool compares component ID chains (`GetID`).
+  `fixed` is likewise only reliable for components of the active assembly.
+- **Configurations**: `set_component_state` acts on the active configuration only, and a component
+  inserted in one configuration appears in all of them unless `suppress_new_components` is set.
+  There is no per-configuration dimension or feature suppression tool yet.
+- **Slow on large assemblies**: `component_status` with mates on a fully resolved sub-assembly of
+  a ~1000-component assembly took over 10 minutes; the MCP adapter's timeout is shorter, so run
+  such calls over HTTP (see the skill) or narrow them with `components`.
 
 ## Next improvements
 
@@ -65,5 +82,11 @@ Most useful first:
    assemblies.
 7. **Delete components and mates by name in one call**, and mark a mate as suppressed instead of
    deleting it.
-8. **Upstream.** The tools are generic (no EVT names in the code). Consider proposing them to
+8. **Sub-assembly mates from the top.** Make `component_status` read mates held inside
+   sub-assemblies without opening them (e.g. open the sub-assembly document invisibly, map its
+   components to the top by ID chain), and speed up the mate scan (cache the mate list per
+   assembly per call).
+9. **Configuration-aware status.** Report a component's suppression in every configuration of
+   its parent at once, and set it for several configurations in one call.
+10. **Upstream.** The tools are generic (no EVT names in the code). Consider proposing them to
    `eyfel/mcp-server-solidworks` (AGPL-3.0; upstream also asks for a CLA).

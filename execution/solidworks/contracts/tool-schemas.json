@@ -419,6 +419,52 @@
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, documents_checked, errors, warnings, clean, problems:[{document, path, first_instance?, items:[{severity, feature, type, code, meaning, mate_components?}]}], components_not_loaded?:[{component, path}]}."
  },
+ "component_status": {
+  "description": "Reports the status of components of the active assembly: suppression state (IComponent2.GetSuppression2), visibility, fixed, envelope, referenced configuration, file path and existence, suppressed parent, ExcludeFromBOM, transform and optionally the component's mates (IComponent2.GetMates: name, type, IFeature.GetErrorCode2 error, referenced component instance paths). Components are named (Name2 or instance path) or listed from IAssemblyDoc.GetComponents and filtered by path substring and state. Does NOT increment state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "components": "string or array (optional — JSON list of component names or instance paths; empty lists all)",
+    "match": "string (optional — substring of the instance path or file path)",
+    "state": "string (optional — suppressed | lightweight | resolved | hidden | missing)",
+    "recursive": "boolean (optional, default true — include nested components when listing)",
+    "include_mates": "boolean (optional — default true when components, match or state is given)",
+    "limit": "integer (optional, default 500 — maximum entries listed)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}."
+ },
+ "set_component_state": {
+  "description": "Sets the suppression state (IComponent2.SetSuppression2: suppressed, lightweight, resolved, fully resolved) and / or visibility (IComponent2.Visible) of components of the active assembly, nested ones by instance path; all names are resolved before anything changes. Rebuilds (EditRebuild3), never saves. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "components": "string or array (required — JSON list of component names or instance paths)",
+    "suppression": "string (optional — suppressed | resolved | lightweight | fully_resolved; 'unsuppress' = resolved)",
+    "visible": "boolean (optional — true shows, false hides)",
+    "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included], all_ok, note}."
+ },
+ "manage_configurations": {
+  "description": "Lists, adds (IModelDoc2.AddConfiguration3, swConfigOption_DontActivate when activate=false), activates (ShowConfiguration2), renames (IConfiguration.Name), deletes (DeleteConfiguration2) or sets properties (Description, SuppressNewComponentModels) of the configurations of the active document. 'list' does NOT increment state_version; the other actions do. Never saves.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "action": "string (optional, default list — list | add | activate | rename | delete | set)",
+    "name": "string (required except for list — configuration name)",
+    "new_name": "string (rename only)",
+    "description": "string (optional — add / set)",
+    "activate": "boolean (optional, default true — add: make the new configuration active)",
+    "suppress_new_components": "boolean (optional — add / set: components inserted in other configurations arrive suppressed here)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, action, active, configurations:[{name, active?, description?, parent?, suppress_new_components?}], note?}."
+ },
  "place_component": {
   "description": "Sets the transform (IComponent2.Transform2 from a 13-number array via IMathUtility.CreateTransform; a fixed component is unfixed to move it and fixed again unless fixed=false) and/or the fixed state (IAssemblyDoc.FixComponent / UnfixComponent on the selected component) of an existing component of the active assembly, found by Name2 among GetComponents(false). Increments state_version.",
   "input": {

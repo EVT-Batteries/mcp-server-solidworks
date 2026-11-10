@@ -145,6 +145,22 @@ Results are in `$r.cadState.features` (often one JSON string).
 - **Moving a sub-assembly up the tree**: read its world transform (`components_flat` of a part it
   contains at identity), delete it from the old parent (its mates go with it), insert it into the
   new parent with that `transform_json`, then mate it; `check_rebuild` every assembly touched.
+- **Component state**: `IComponent2.GetSuppression2` / `SetSuppression2` (swComponentSuppressionState_e:
+  0 suppressed, 1 lightweight, 2 fully resolved, 3 resolved; SetSuppression2 returns
+  swSuppressionError_e, 2 = ok), `Visible` (0 / 1), `ReferencedConfiguration`; all act on the
+  active configuration of the assembly that holds the component. Resolving one nested component
+  resolves its sub-assembly, not its siblings.
+- **Mates of a component**: `IComponent2.GetMates()` returned nothing for nested and lightweight
+  components; walk the `MateGroup` sub-features (mate folders included) of the active assembly
+  and test each `IMate2.MateEntity(k).ReferenceComponent`. Compare components by their chain of
+  `GetID()` values, not by name: a sub-assembly's own tree can name the same instance differently
+  from the top (seen after Pack and Go).
+- **Configurations**: `AddConfiguration3(name, comment, alt, options)` copies the active one
+  (option 128 = don't activate); `ShowConfiguration2` returns false for the configuration that is
+  already active; a component inserted in one configuration appears in all of them unless the
+  others have `SuppressNewComponentModels`.
+- **File paths**: `AddComponent5` returned null for a forward-slash path (`C:/dir/part.sldprt`)
+  of a part that was not loaded; normalize with `Path.GetFullPath`.
 - **Screenshots**: `IModelDoc2.SaveBMP(path, w, h)` captures the document window (it must be
   visible: activate it first); it never writes the document.
 

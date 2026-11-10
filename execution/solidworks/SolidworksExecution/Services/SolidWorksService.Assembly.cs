@@ -664,6 +664,9 @@ namespace SolidworksExecution.Services
                 if (!System.IO.File.Exists(filePath))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "FILE_NOT_FOUND", $"No file at '{filePath}'.");
+                // AddComponent5 returns null for a path with forward slashes (C:/dir/part.sldprt)
+                // whose document is not loaded yet: normalize to the Windows form.
+                filePath = System.IO.Path.GetFullPath(filePath);
                 double x = p?.Value<double?>("x") ?? 0.0;
                 double y = p?.Value<double?>("y") ?? 0.0;
                 double z = p?.Value<double?>("z") ?? 0.0;

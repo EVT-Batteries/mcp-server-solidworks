@@ -104,7 +104,7 @@ The `adapters/` layer is provider-specific and replaceable. Because the executio
 
 ## Tool List
 
-The system currently exposes **53 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
+The system currently exposes **56 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
 
 The **resources** carry the rule set and the contracts, not behaviour: `recipe://usage/index` plus one static `recipe://usage/<section>` per rule section, and `schema://feature-graph` + `schema://analysis-artifact`. The split is deliberate — a tool's description is paid on every single turn whether or not it is used, while a resource body costs only when read, so near-static reference material belongs on the resource side.
 
@@ -146,6 +146,9 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `measure_curves` — true 3D lengths of sweep paths and 3D sketches (lines, arcs, splines), in a part or across every component of an assembly (e.g. cable and wire lengths); `include_geometry` adds each segment's 3D points (assembly coordinates in an assembly).
 - `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit and a caption band); the document file is never written.
 - `check_rebuild` — SolidWorks' What's Wrong for the active document and every loaded sub-assembly and part: rebuild errors and warnings, with the components each broken mate references.
+- `component_status` — status of an assembly's components (suppressed / lightweight / resolved, hidden, fixed, missing file, suppressed parent), nested ones included, with each component's mates and their rebuild errors.
+- `set_component_state` — suppresses, resolves or makes lightweight components (nested ones by instance path), shows / hides them or sets the configuration they reference, in the active configuration; rebuilds and returns their mates' status.
+- `manage_configurations` — lists, adds, activates, renames or deletes configurations of the active part or assembly (variants such as left / right hand assemblies).
 - `verify_state` — returns the current state and feature tree.
 
 ### Assembly
