@@ -48,7 +48,8 @@ description: >-
 4. **Adapter**: add the `@mcp.tool` in `server.py`. The docstring is all the model sees: units
    (meters), what changes, what the result holds. Variable-length arrays are JSON strings
    (`points: str = "[]"`). Run the contract test:
-   `uv run --no-project --python 3.13 --with-requirements adapters/claude/requirements.txt python adapters/claude/tests/test_schema_contract.py`.
+   `uv run --no-project --python 3.13 --with-requirements adapters/claude/requirements.txt --with pytest python -m pytest -q adapters/claude/tests`
+   (contract, HTTP client and error-passing tests).
 5. **README**: tool count and the tool's line in its section.
 
 ## Building
@@ -138,15 +139,32 @@ Results are in `$r.cadState.features` (often one JSON string).
   part document selects another face in the assembly. Always take mate indices from
   `analyze_assembly(faces, component=...)` and identify the face there by normal, area and point
   (component-local coordinates). Single-body parts number their faces the same in both.
-- **STEP imports**: a multi-body STEP opens as an assembly; `save_document` to a `.sldprt` path
-  saves it as a single-body (or multi-body) part. `analyze_model` needs that part, not the
-  assembly: close the import and reopen the saved `.sldprt` (the open document stays the import
-  after the save).
+- **STEP imports**: a multi-body STEP opens as an assembly; saving it to a `.sldprt` path makes a
+  part, but the open document stays the import. `import_step` saves, closes the import
+  (`CloseDoc`) and opens the saved part (`OpenDoc6`). Face queries on large imports (thousands of
+  faces) take minutes: run them once and reuse the indices.
 - **Add-mate errors**: `AddMate5` returns a mate even when it reports an error through its
-  out-parameter (swAddMateError_e: 1 no error, 5 over-defined assembly, ...); check it, then
-  `check_rebuild`. A second set of mates on a rigid sub-assembly already located by mates
-  over-defines it even when the geometry agrees exactly. Face queries on large imports (thousands of faces) take minutes: run them once, in the
-  background, and reuse the indices.
+  out-parameter (swAddMateError_e: 1 no error, 5 over-defined assembly, ...), and an accepted mate
+  can still turn other mates into errors. `add_mate` diffs `GetWhatsWrong` before and after and
+  deletes the new mate (select its feature, `DeleteSelection2`) on any problem. A second set of
+  mates on a rigid sub-assembly already located by mates over-defines it even when the geometry
+  agrees exactly. What's Wrong and `GetErrorCode2` both give code 1 for such a mate.
+- **Lightweight components**: `IComponent2.IsSuppressed()` returned true for a lightweight part
+  (one of three in a test assembly): read suppression with `GetSuppression2` only. A lightweight
+  component has no bodies (`GetBodies3` empty, `GetModelDoc2` often null); `SetSuppression2(3)`
+  resolves it and the other instances of its file, and can rename instances, so re-find
+  components by `GetID` chain afterwards (`ResolveForGeometry`). Open an assembly lightweight or
+  resolved with `GetOpenDocSpec`, `LightWeight`, `UseLightWeightDefault = false`, `OpenDoc7`;
+  `GetLightWeightComponentCount` / `ResolveAllLightWeightComponents(false)` for the whole tree.
+- **Interference**: `IAssemblyDoc.InterferenceDetectionManager` checks the SELECTED components
+  (`IComponent2.Select4`) or the whole assembly; set its options, read `GetInterferences()`
+  (`IInterference.Components`, `Volume`, `GetInterferenceBody`), then call `Done()`. Minimum
+  distance: select two components, `Extension.CreateMeasure()`, `ArcOption = 1`,
+  `Calculate(null)`, `Distance`; it fails on intersecting bodies.
+- **Adapter errors**: the MCP SDK (v2) shows the model only the text of a `ToolError`; any other
+  exception becomes "Error executing tool <name>". `server.py` wraps `mcp.tool` so every tool
+  raises `ToolError`, and `ExecutionLayerError` / `CadOperationError` are `ToolError`s. New tools
+  on `@mcp.tool(...)` get the wrapper on their own; add a long-running tool to `LONG_TOOLS`.
 - **Moving a sub-assembly up the tree**: read its world transform (`components_flat` of a part it
   contains at identity), delete it from the old parent (its mates go with it), insert it into the
   new parent with that `transform_json`, then mate it; `check_rebuild` every assembly touched.

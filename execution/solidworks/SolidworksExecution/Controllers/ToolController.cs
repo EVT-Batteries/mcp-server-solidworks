@@ -192,6 +192,8 @@ namespace SolidworksExecution.Controllers
                 case "open_new_assembly":      return _service.OpenNewAssembly(request);
                 case "insert_component":       return _service.InsertComponent(request);
                 case "add_mate":               return _service.AddMateTool(request);
+                case "check_interference":     return _service.CheckInterference(request);
+                case "import_step":            return _service.ImportStep(request);
                 case "save_body_as_part":      return _service.SaveBodyAsPart(request);
                 default:                       return null;
             }

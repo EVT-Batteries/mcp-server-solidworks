@@ -104,14 +104,15 @@ The `adapters/` layer is provider-specific and replaceable. Because the executio
 
 ## Tool List
 
-The system currently exposes **56 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
+The system currently exposes **58 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
 
 The **resources** carry the rule set and the contracts, not behaviour: `recipe://usage/index` plus one static `recipe://usage/<section>` per rule section, and `schema://feature-graph` + `schema://analysis-artifact`. The split is deliberate — a tool's description is paid on every single turn whether or not it is used, while a resource body costs only when read, so near-static reference material belongs on the resource side.
 
 ### Document and lifecycle
 - `ensure_ready` — launches SolidWorks via COM and attaches if it is closed (does not open a document).
 - `open_new_part` — opens a new part document.
-- `open_document` — opens an existing file from disk (native `.sldprt`/`.sldasm`/`.slddrw`; imports `.ipt`/`.CATPart`/STEP/IGES via 3D Interconnect when the translator is available, otherwise returns a clear `OPEN_FAILED`).
+- `open_document` — opens an existing file from disk (native `.sldprt`/`.sldasm`/`.slddrw`; imports `.ipt`/`.CATPart`/STEP/IGES via 3D Interconnect when the translator is available, otherwise returns a clear `OPEN_FAILED`); `lightweight` opens an assembly's components lightweight or fully resolved.
+- `import_step` — imports a STEP / IGES / Parasolid file, saves it as a `.SLDPRT` and leaves that part open (not the import document), with its bodies and bounding box.
 - `activate_document` — switches between open documents.
 - `save_document` — saves the part or drawing to disk.
 - `close_document` — closes the document.
@@ -146,6 +147,7 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `measure_curves` — true 3D lengths of sweep paths and 3D sketches (lines, arcs, splines), in a part or across every component of an assembly (e.g. cable and wire lengths); `include_geometry` adds each segment's 3D points (assembly coordinates in an assembly).
 - `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit and a caption band); the document file is never written.
 - `check_rebuild` — SolidWorks' What's Wrong for the active document and every loaded sub-assembly and part: rebuild errors and warnings, with the components each broken mate references.
+- `check_interference` — interference detection for named components against the parts near them (or the whole assembly): overlapping pairs with their volume and location, and with `clearance`, every neighbour closer than a distance.
 - `component_status` — status of an assembly's components (suppressed / lightweight / resolved, hidden, fixed, missing file, suppressed parent), nested ones included, with each component's mates and their rebuild errors.
 - `set_component_state` — suppresses, resolves or makes lightweight components (nested ones by instance path), shows / hides them or sets the configuration they reference, in the active configuration; rebuilds and returns their mates' status.
 - `manage_configurations` — lists, adds, activates, renames or deletes configurations of the active part or assembly (variants such as left / right hand assemblies).
@@ -155,7 +157,7 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `open_new_assembly` — opens a new blank assembly document.
 - `insert_component` — inserts a part or sub-assembly file as a component: insertion point or a full 13-number transform, fixed or floating.
 - `place_component` — sets an existing component's transform and/or fixed state (e.g. fix parts modelled in assembly coordinates at the origin).
-- `add_mate` — adds a mate (coincident, concentric, parallel, perpendicular, tangent, distance, angle, lock) using robust **index-based** entity selection.
+- `add_mate` — adds a mate (coincident, concentric, parallel, perpendicular, tangent, distance, angle, lock) using robust **index-based** entity selection; a mate SolidWorks rejects (over-defined, or new rebuild errors) is deleted and the call fails with the reason.
 - `analyze_assembly` — reads components (tree order with full transforms, incl. a flattened leaf view across nesting levels), mates (creation order, locale-proof enum types, entity anchors), or one component's face/edge lists.
 - `save_body_as_part` — extracts one body of a multibody part into its own part file (for flattened assembly STEP imports).
 - `compare_assemblies` — objective assembly diff (component set, per-component transforms to ≤1 µm, mate count + types, mass properties) with the `verified` verdict.

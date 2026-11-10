@@ -7,6 +7,13 @@ DUPLICATE → success text noting idempotent result
 """
 import json
 
+from mcp.server.mcpserver.exceptions import ToolError
+
+
+class CadOperationError(ToolError, RuntimeError):
+    """A FAILED execution response. A ToolError, so the MCP SDK shows its message (code and
+    text) to the model; also a RuntimeError, for the adapter code that catches those."""
+
 
 def map_response(response: dict) -> str:
     """
@@ -40,9 +47,9 @@ def map_response(response: dict) -> str:
 
     if status == "FAILED":
         error = response.get("error") or {}
-        raise RuntimeError(
+        raise CadOperationError(
             f"CAD operation failed | code={error.get('code')} | "
             f"message={error.get('message')}"
         )
 
-    raise RuntimeError(f"Unknown execution response status: {status}")
+    raise CadOperationError(f"Unknown execution response status: {status}")

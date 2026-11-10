@@ -105,6 +105,9 @@
     <Compile Include="Services\SolidWorksService.Health.cs" />
     <Compile Include="Services\SolidWorksService.ComponentState.cs" />
     <Compile Include="Services\SolidWorksService.Configuration.cs" />
+    <Compile Include="Services\SolidWorksService.Lightweight.cs" />
+    <Compile Include="Services\SolidWorksService.Interference.cs" />
+    <Compile Include="Services\SolidWorksService.Import.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

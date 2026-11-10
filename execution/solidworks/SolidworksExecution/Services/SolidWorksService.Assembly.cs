@@ -147,6 +147,21 @@ namespace SolidworksExecution.Services
                     if (string.Equals(ComponentPath(comp), name, StringComparison.OrdinalIgnoreCase)) return comp;
                 }
             }
+            // Last resort: the one component whose instance path ends with the name ("Part-1" for
+            // "Sub-1/Part-1", or the tail of a longer path). An ambiguous tail matches nothing.
+            if (!string.IsNullOrEmpty(name) && asm.GetComponents(false) is object[] every)
+            {
+                IComponent2 hit = null;
+                int hits = 0;
+                string tail = "/" + name;
+                foreach (var c in every)
+                {
+                    var comp = c as IComponent2;
+                    if (comp == null) continue;
+                    if (ComponentPath(comp).EndsWith(tail, StringComparison.OrdinalIgnoreCase)) { hit = comp; hits++; }
+                }
+                if (hits == 1) return hit;
+            }
             return null;
         }
 
@@ -198,7 +213,8 @@ namespace SolidworksExecution.Services
             }
             catch { }
             cj["fixed"] = comp.IsFixed();
-            if (comp.IsSuppressed()) cj["suppressed"] = true;
+            if (SafeSuppression(comp) == 0) cj["suppressed"] = true;
+            else if (IsLightweightState(SafeSuppression(comp))) cj["lightweight"] = true;
             var t = TransformJson(comp);
             if (t != null) cj["transform"] = t;
             return cj;
@@ -251,7 +267,8 @@ namespace SolidworksExecution.Services
                     }
                     catch { }
                     cj["fixed"] = comp.IsFixed();
-                    if (comp.IsSuppressed()) cj["suppressed"] = true;
+                    if (SafeSuppression(comp) == 0) cj["suppressed"] = true;
+                    else if (IsLightweightState(SafeSuppression(comp))) cj["lightweight"] = true;
                     try
                     {
                         int children = comp.IGetChildrenCount();
@@ -362,11 +379,15 @@ namespace SolidworksExecution.Services
             if (comp == null)
             {
                 errCode = "COMPONENT_NOT_FOUND";
-                errMsg = $"No top-level component named '{componentName}'. Use analyze_assembly(components) for the exact Name2 values (e.g. 'Shaft-1').";
+                errMsg = ComponentNotFoundMessage(asm, componentName);
                 return null;
             }
+            // A lightweight component has no bodies: load it (reported in the result).
+            comp = ResolveForGeometry(asm, comp, out errCode, out errMsg);
+            if (comp == null) return null;
             var root = new JObject();
             root["component"] = comp.Name2;
+            AddAutoResolved(root);
             var t = TransformJson(comp);
             if (t != null) root["transform"] = t;
             var arr = new JArray();
@@ -418,9 +439,11 @@ namespace SolidworksExecution.Services
             if (comp == null)
             {
                 errCode = "COMPONENT_NOT_FOUND";
-                errMsg = $"No top-level component named '{componentName}'.";
+                errMsg = ComponentNotFoundMessage(asm, componentName);
                 return null;
             }
+            comp = ResolveForGeometry(asm, comp, out errCode, out errMsg);
+            if (comp == null) return null;
             bool faces = kind == "face";
             if (!faces && kind != "edge")
             {
@@ -471,6 +494,7 @@ namespace SolidworksExecution.Services
 
             try
             {
+                _autoResolved.Clear();
                 var p = request.Params as JObject;
                 string analysisType = (p?.Value<string>("analysis_type") ?? "components").ToLowerInvariant();
 
@@ -811,6 +835,60 @@ namespace SolidworksExecution.Services
             return last;
         }
 
+        private static string AddMateErrorName(int e)
+        {
+            switch (e)
+            {
+                case 0: return "unknown error";
+                case 1: return "no error";
+                case 2: return "incorrect mate type";
+                case 3: return "incorrect alignment";
+                case 4: return "incorrect selections";
+                case 5: return "over-defined assembly";
+                case 6: return "incorrect gear ratios";
+                default: return "swAddMateError_e " + e;
+            }
+        }
+
+        // The active document's What's Wrong items: "feature|code" -> "feature (severity: meaning)".
+        private static Dictionary<string, string> WrongItems(IModelDoc2 doc)
+        {
+            var d = new Dictionary<string, string>();
+            object feats = null, codes = null, warns = null;
+            bool any = false;
+            try { any = doc.Extension.GetWhatsWrong(out feats, out codes, out warns); } catch { }
+            if (!any || !(feats is object[] fa)) return d;
+            var ca = codes as int[];
+            var wa = warns as bool[];
+            for (int i = 0; i < fa.Length; i++)
+            {
+                string name = (fa[i] as IFeature)?.Name ?? "?";
+                int code = BetterErrorCode(fa[i] as IFeature, ca != null && i < ca.Length ? ca[i] : -1);
+                bool warning = wa != null && i < wa.Length && wa[i];
+                string meaning = FeatureErrors.TryGetValue(code, out var m) ? m : "code " + code;
+                d[name + "|" + code] = name + " (" + (warning ? "warning" : "error") + ": " + meaning + ")";
+            }
+            return d;
+        }
+
+        private static bool DeleteMateByName(IModelDoc2 doc, string name)
+        {
+            try
+            {
+                foreach (var f in MateFeatures(doc.FirstFeature() as IFeature))
+                {
+                    if (f.Name != name) continue;
+                    doc.ClearSelection2(true);
+                    if (!f.Select2(false, 0)) return false;
+                    bool ok = doc.Extension.DeleteSelection2(0);
+                    doc.ClearSelection2(true);
+                    return ok;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         // add_mate — AddMate5 (B3). Entity selection is INDEX-FIRST: each side is
         // (component Name2, kind face|edge, index from analyze_assembly(faces|edges, component)).
         // value: METERS for distance, DEGREES for angle (C4 — degrees at tool boundaries).
@@ -831,7 +909,9 @@ namespace SolidworksExecution.Services
 
             try
             {
+                _autoResolved.Clear();
                 var p = request.Params as JObject;
+                bool keepOnError = p?.Value<bool?>("keep_on_error") ?? false;
                 string mateType = p?.Value<string>("mate_type");
                 int mateTypeInt = MateTypeFromName(mateType);
                 if (mateTypeInt < 0)
@@ -885,6 +965,8 @@ namespace SolidworksExecution.Services
                 if (mateTypeInt == 6) { ang = value * Math.PI / 180.0; angU = ang; angL = ang; }
 
                 int errStat = 0;
+                string lastMateBefore = LastMateName(modelDoc);
+                var wrongBefore = WrongItems(modelDoc);
                 var mate = asm.AddMate5(mateTypeInt, alignInt, flip,
                     dist, distU, distL, 0, 0, ang, angU, angL,
                     false /* ForPositioningOnly */, false /* LockRotation */, 0 /* WidthMateOption */,
@@ -893,15 +975,59 @@ namespace SolidworksExecution.Services
                 if (mate == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "ADD_MATE_FAILED",
-                        $"AddMate5 returned null (ErrorStatus={errStat}, swAddMateError_e). Check the entity kinds fit the mate type (e.g. concentric wants cylindrical faces) and the alignment.");
+                        $"AddMate5 returned null (ErrorStatus={errStat}: {AddMateErrorName(errStat)}). Check the entity kinds fit the mate type (e.g. concentric wants cylindrical faces) and the alignment.");
 
                 modelDoc.EditRebuild3();
 
-                var features = new List<string>();
                 string mateName = LastMateName(modelDoc);
+                if (mateName == lastMateBefore) mateName = null;   // no new mate feature found
+
+                // SolidWorks returns a mate even when it reports an error (e.g. over-defined), and
+                // such a mate can turn other mates into errors. Compare What's Wrong before / after.
+                string ownProblem = null;
+                var disturbed = new List<string>();
+                foreach (var kv in WrongItems(modelDoc))
+                {
+                    if (wrongBefore.ContainsKey(kv.Key)) continue;
+                    if (mateName != null && kv.Key.StartsWith(mateName + "|", StringComparison.Ordinal)) ownProblem = kv.Value;
+                    else disturbed.Add(kv.Value);
+                }
+                bool mateBad = errStat != 1 || ownProblem != null || disturbed.Count > 0;
+                if (mateBad && !keepOnError)
+                {
+                    bool deleted = mateName != null && DeleteMateByName(modelDoc, mateName);
+                    modelDoc.EditRebuild3();
+                    string code = errStat == 5 || (ownProblem ?? "").Contains("over-defin") ? "MATE_OVER_DEFINED"
+                        : errStat != 1 ? "ADD_MATE_ERROR" : "MATE_REBUILD_ERROR";
+                    string msg = "SolidWorks rejected the mate";
+                    if (errStat != 1) msg += $": AddMate5 error {errStat} ({AddMateErrorName(errStat)})";
+                    msg += ".";
+                    if (ownProblem != null) msg += $" The new mate: {ownProblem}.";
+                    if (disturbed.Count > 0)
+                        msg += $" It caused {disturbed.Count} new problem(s): "
+                            + string.Join("; ", disturbed.GetRange(0, Math.Min(disturbed.Count, 8)))
+                            + (disturbed.Count > 8 ? "; ..." : "") + ".";
+                    msg += deleted
+                        ? $" The mate '{mateName}' was deleted and the assembly rebuilt, so nothing changed."
+                        : " The mate could NOT be removed: run check_rebuild and delete it.";
+                    if (code == "MATE_OVER_DEFINED")
+                        msg += " A component already located by other mates (or fixed, or part of a rigid sub-assembly that is) cannot take this one: remove the conflicting mate, or set the pose with place_component.";
+                    msg += " Pass keep_on_error=true to keep such a mate for inspection.";
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), code, msg);
+                }
+
+                var features = new List<string>();
                 if (mateName != null) features.Add($"mate={mateName}");
                 features.Add($"type={MateTypeName(mateTypeInt)}");
                 features.Add($"error_status={errStat}");
+                if (mateBad)
+                {
+                    features.Add($"error={AddMateErrorName(errStat)}");
+                    if (ownProblem != null) features.Add("mate_problem=" + ownProblem);
+                    if (disturbed.Count > 0) features.Add("new_problems=" + new JArray(disturbed.ToArray()).ToString(Newtonsoft.Json.Formatting.None));
+                }
+                if (_autoResolved.Count > 0)
+                    features.Add("resolved_from_lightweight=" + new JArray(_autoResolved.ToArray()).ToString(Newtonsoft.Json.Formatting.None));
                 var compA = FindComponentByName(asm, aComp);
                 var compB = FindComponentByName(asm, bComp);
                 var ta = compA != null ? TransformJson(compA) : null;

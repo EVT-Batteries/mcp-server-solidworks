@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import inspect
 import json
@@ -9,7 +10,9 @@ from typing import Annotated, Literal, Optional
 from pydantic import Field
 from mcp.server import MCPServer
 from mcp.server.caching import CacheHint
-from mcp.server.mcpserver.exceptions import ResourceError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
+from mcp.shared.exceptions import MCPError
+from config import LONG_HTTP_TIMEOUT
 from execution_client import call_tool, get_state, ensure_ready as _ensure_ready, ExecutionLayerError
 from response_mapper import map_response
 # NOTE: pycompiler is reached via `from ir_execution_port import run_feature_graph` imported
@@ -55,6 +58,49 @@ mcp = MCPServer(
     },
 )
 
+# Error passing. The SDK shows the model the message of a ToolError only: any other exception
+# (RuntimeError, httpx errors, a JSON decode error, ...) reaches it as a bare "Error executing tool
+# <name>" with the reason only in the server log. Every tool is therefore registered through this
+# wrapper, which turns whatever it raises into a ToolError carrying the exception's type and text.
+_register_tool = mcp.tool
+
+
+def _tool_with_errors(*dargs, **dkwargs):
+    register = _register_tool(*dargs, **dkwargs)
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except (ToolError, MCPError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - the point is to pass every error on
+                text = str(exc) or repr(exc)
+                if not isinstance(exc, RuntimeError):
+                    text = f"{type(exc).__name__}: {text}"
+                raise ToolError(text) from exc
+
+        return register(wrapper)
+
+    return decorate
+
+
+mcp.tool = _tool_with_errors
+
+# Tools that can run for minutes on a large assembly: they wait LONG_HTTP_TIMEOUT instead of
+# HTTP_TIMEOUT for the execution server's answer.
+LONG_TOOLS = {
+    "analyze_assembly", "check_interference", "check_rebuild", "component_status",
+    "set_component_state", "import_step", "measure_curves", "manage_configurations",
+    "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
+}
+
+
+def _timeout_for(tool_name: str) -> float | None:
+    return LONG_HTTP_TIMEOUT if tool_name in LONG_TOOLS else None
+
+
 # Tracks state_version in memory. Starts at 0, updated after every response.
 # Auto-resyncs from the execution layer on an INVALID_STATE_VERSION mismatch
 # (e.g. the execution server was restarted after a rebuild).
@@ -87,12 +133,13 @@ def _call(tool_name: str, params: dict) -> str:
     removes the need to restart the adapter after every execution-layer rebuild.
     """
     global _state_version
+    timeout = _timeout_for(tool_name)
     response = call_tool(tool_name, _next_operation_id(),
-                         _state_version, params)
+                         _state_version, params, timeout)
     if _is_state_mismatch(response):
         _state_version = get_state()
         response = call_tool(
-            tool_name, _next_operation_id(), _state_version, params)
+            tool_name, _next_operation_id(), _state_version, params, timeout)
     _update_state_version(response)
     return map_response(response)
 
@@ -145,7 +192,8 @@ def open_new_part(template_path: str = "") -> str:
 # Tool: open_document
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
-def open_document(file_path: str, as_assembly: bool = False) -> str:
+def open_document(file_path: str, as_assembly: bool = False,
+                  lightweight: bool | None = None) -> str:
     """Open an EXISTING document from disk (counterpart to open_new_part, which makes a BLANK doc).
     file_path: full path to the file.
       - Native .sldprt / .sldasm / .slddrw open directly.
@@ -155,11 +203,41 @@ def open_document(file_path: str, as_assembly: bool = False) -> str:
         convert to STEP or defer that file.
       - as_assembly=True (foreign files only): the file is an ASSEMBLY STEP — the classic import
         would flatten it to a MULTIBODY PART; this asks for a real assembly import instead.
+      - To turn a STEP into a native part, use import_step: after open_document the active
+        document stays the import, on which part queries fail.
+    lightweight (assemblies only): True opens every component lightweight (fast, no geometry
+    loaded), False fully resolved; left out, SolidWorks' own setting decides. The result
+    reports `lightweight_components=N` when some are lightweight. Tools that need a component's
+    geometry (analyze_assembly faces/edges, add_mate, check_interference) resolve the components
+    they are given; check_rebuild and measure_curves skip lightweight ones unless
+    resolve_lightweight=True.
     Makes the opened document active and bumps state_version."""
-    params = {"file_path": file_path}
+    params: dict = {"file_path": file_path}
     if as_assembly:
         params["as_assembly"] = True
+    if lightweight is not None:
+        params["lightweight"] = lightweight
     return _call("open_document", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: import_step
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def import_step(file_path: str, save_as: str = "", overwrite: bool = False) -> str:
+    """Import a neutral CAD file (.step / .stp / .iges / .igs / .x_t / .x_b / .sat) as a NATIVE
+    PART and leave that part open and active, ready for analyze_model, faces and insert_component.
+    It imports the file (as open_document does), saves the import as a .SLDPRT (an assembly STEP
+    becomes one multi-body part), closes the import document and reopens the saved part.
+    save_as: the .SLDPRT path (default: next to the source, same name). Fails with FILE_EXISTS
+    when it exists, unless overwrite=True. Never point save_as at SharePoint / OneDrive CAD.
+    Returns source, part (path), imported_as (PART / ASSEMBLY), solid_bodies, surface_bodies,
+    box_min / box_max / size (m) and a warning when the import has no solid body. Bumps
+    state_version."""
+    params: dict = {"file_path": file_path, "overwrite": overwrite}
+    if save_as:
+        params["save_as"] = save_as
+    return _call("import_step", params)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +277,11 @@ def analyze_assembly(
         space (location + direction + radii).
     analysis_type='faces' / 'edges': ONE component's face/edge list with stable indices — feeds
         add_mate's index-based entity selection. Requires `component` (the Name2 from
-        'components'). Coordinates are COMPONENT-LOCAL (the payload carries the transform)."""
+        'components', or an instance path 'Sub-1/Part-1'). Coordinates are COMPONENT-LOCAL (the
+        payload carries the transform). A lightweight component (and its lightweight parents) is
+        resolved first and listed in resolved_from_lightweight; resolving can rename instances.
+    Components report `lightweight: true` when they are lightweight. An unknown name fails with
+    the closest instance paths."""
     params = {"analysis_type": analysis_type}
     if component:
         params["component"] = component
@@ -246,6 +328,7 @@ def check_rebuild(
     rebuild: bool = True,
     recursive: bool = True,
     include_warnings: bool = True,
+    resolve_lightweight: bool = False,
 ) -> str:
     """SolidWorks' "What's Wrong" list for the active document (does NOT change state_version;
     never saves). rebuild=True force-rebuilds the active document first, so the list is current.
@@ -254,11 +337,54 @@ def check_rebuild(
     Each problem gives severity (error / warning), the feature or mate name and type, the
     swFeatureError_e code and its meaning, and for a mate `mate_components`: the instance path of
     each component it references (null = that reference is gone). `components_not_loaded` lists
-    unsuppressed components whose file could not be loaded. `clean` is true when nothing is wrong.
-    Run it after every structural change (deleted features, moved or replaced components) and
-    before saving an assembly."""
+    unsuppressed components whose file could not be loaded, with a reason (lightweight /
+    not loaded / file missing). Lightweight components are not checked (no model loaded):
+    resolve_lightweight=True resolves every lightweight component first (slow on a large assembly;
+    reported as lightweight_resolved). `clean` is true when nothing is wrong and every component
+    was checked. Run it after every structural change (deleted features, moved or replaced
+    components) and before saving an assembly."""
     return _call("check_rebuild", {"rebuild": rebuild, "recursive": recursive,
-                                   "include_warnings": include_warnings})
+                                   "include_warnings": include_warnings,
+                                   "resolve_lightweight": resolve_lightweight})
+
+
+# ---------------------------------------------------------------------------
+# Tool: check_interference
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def check_interference(
+    components: str = "[]",
+    clearance: Annotated[float, Field(ge=0)] = 0.0,
+    treat_coincidence_as_interference: bool = False,
+    treat_subassemblies_as_components: bool = False,
+    include_hidden: bool = False,
+    resolve_lightweight: bool = False,
+    limit: Annotated[int, Field(ge=1)] = 100,
+) -> str:
+    """Interference detection in the ACTIVE assembly (read-only: does NOT change state_version,
+    never saves).
+    components: JSON list of component names or instance paths ("Sub-1/Part-1") to check against
+    the parts around them, e.g. a cable bundle or a plug. The neighbours are the unsuppressed,
+    visible leaf parts whose bounding box comes within `clearance` of a named component; only
+    interferences involving a named component are reported. Empty: SolidWorks checks the whole
+    assembly (slow on a large one).
+    clearance (m, needs `components`): also report every neighbour closer than this to a named
+    component (minimum distance, SolidWorks Measure), e.g. 0.005 for 5 mm.
+    treat_coincidence_as_interference: touching faces count (default: they don't, so a plug
+    seated on its header is not an interference). treat_subassemblies_as_components: a
+    sub-assembly counts as one body. include_hidden: also check hidden components.
+    Lightweight components are resolved when named or near a named component (reported as
+    resolved_from_lightweight); for a whole-assembly check pass resolve_lightweight=True.
+    Returns interference_count, interferences (largest first: components, volume_mm3,
+    box_min / box_max of the overlap, m), clearance {required_m, violations [{a, b,
+    distance_mm}], nearest_m, nearest_pair}, neighbours_checked, warning when something could not
+    be checked, and `clear` (true = no interference, no clearance violation, nothing skipped)."""
+    return _call("check_interference", {
+        "components": components, "clearance": clearance,
+        "treat_coincidence_as_interference": treat_coincidence_as_interference,
+        "treat_subassemblies_as_components": treat_subassemblies_as_components,
+        "include_hidden": include_hidden, "resolve_lightweight": resolve_lightweight,
+        "limit": limit})
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +495,8 @@ def place_component(
 ) -> str:
     """Set the transform and/or the fixed state of an EXISTING component of the active assembly
     (insert_component does this for a component it inserts). Bumps state_version.
-    component: the instance name (Name2) from analyze_assembly(components), e.g. 'Cable-1'.
+    component: the instance name (Name2) from analyze_assembly(components), e.g. 'Cable-1', or an
+        instance path ('Sub-1/Part-1'); a suppressed component fails with COMPONENT_SUPPRESSED.
     transform_json: optional full placement, a JSON array STRING of 13 numbers (3x3 rotation
         row-major + translation xyz in meters + scale), as analyze_assembly reports it;
         '[1,0,0,0,1,0,0,0,1,0,0,0,1]' puts the part's origin on the assembly's. A fixed component
@@ -400,6 +527,7 @@ def add_mate(
     alignment: Literal["aligned", "anti_aligned", "closest"] = "closest",
     flip: bool = False,
     value: float = 0.0,
+    keep_on_error: bool = False,
 ) -> str:
     """Add a mate between two component entities in the ACTIVE assembly.
     Entity selection is INDEX-based (robust — coordinate picks miss real geometry): each side is
@@ -408,11 +536,21 @@ def add_mate(
     value: METERS for distance mates, DEGREES for angle mates (ignored otherwise).
     alignment 'closest' lets SolidWorks pick the nearer solution; the mates reader reports the
     RESOLVED alignment afterwards.
+    Components may be nested (instance paths); lightweight ones are resolved first.
     Returns the mate name + both components' post-rebuild transforms — compare against the
-    original's readback after EVERY mate (the stop-check discipline)."""
+    original's readback after EVERY mate (the stop-check discipline).
+    Failure: SolidWorks can create a mate and still reject it (e.g. over-defined assembly, AddMate5
+    error 5), or a new mate can turn other mates into errors. The tool compares What's Wrong
+    before and after: on any such problem it DELETES the new mate, rebuilds and fails with
+    MATE_OVER_DEFINED / ADD_MATE_ERROR / MATE_REBUILD_ERROR naming the problems, so the assembly
+    is unchanged. A component already located by other mates (or a rigid sub-assembly located
+    elsewhere) cannot take another mate: place it with place_component instead.
+    keep_on_error=True keeps such a mate and reports it (error, mate_problem, new_problems)."""
     params = {"mate_type": mate_type, "alignment": alignment,
               "a_component": a_component, "a_kind": a_kind, "a_index": a_index,
               "b_component": b_component, "b_kind": b_kind, "b_index": b_index}
+    if keep_on_error:
+        params["keep_on_error"] = True
     if flip:
         params["flip"] = True
     if mate_type in ("distance", "angle"):
@@ -1119,6 +1257,7 @@ def measure_curves(
     include_construction: bool = False,
     per_segment: bool = False,
     include_geometry: bool = False,
+    resolve_lightweight: bool = False,
 ) -> str:
     """Measure curve LENGTHS in the active part or assembly (read-only, does NOT change state).
     Reports every SWEEP (path sketch or edges, path length, profile sketch and, for a single-circle
@@ -1140,8 +1279,11 @@ def measure_curves(
     include_geometry: per segment (implies per_segment) also its 3D geometry in meters: start /
         end, center + radius for arcs, through-points for splines. Coordinates are the part's
         model coordinates, or ASSEMBLY coordinates (component transform applied) when the active
-        document is an assembly — read a route here, edit it, and redraw it with create_3d_path."""
+        document is an assembly — read a route here, edit it, and redraw it with create_3d_path.
+    resolve_lightweight: in an assembly, resolve every lightweight component first so it is
+        measured instead of skipped (reported as lightweight_resolved)."""
     return _call("measure_curves", {"name": name, "include_2d": include_2d,
+                                    "resolve_lightweight": resolve_lightweight,
                                     "include_construction": include_construction,
                                     "per_segment": per_segment,
                                     "include_geometry": include_geometry})
@@ -2276,10 +2418,11 @@ def _call_raw(tool_name: str, params: dict) -> dict:
     Used by adapter-side orchestration (save_analysis) that needs the structured payloads the
     analyze tools carry in `result_geometry`. Same one-shot resync-retry on INVALID_STATE_VERSION."""
     global _state_version
-    response = call_tool(tool_name, _next_operation_id(), _state_version, params)
+    timeout = _timeout_for(tool_name)
+    response = call_tool(tool_name, _next_operation_id(), _state_version, params, timeout)
     if _is_state_mismatch(response):
         _state_version = get_state()
-        response = call_tool(tool_name, _next_operation_id(), _state_version, params)
+        response = call_tool(tool_name, _next_operation_id(), _state_version, params, timeout)
     _update_state_version(response)
     return response
 

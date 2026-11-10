@@ -17,10 +17,11 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "file_path": "string (required — full path to the file to open; .sldprt/.sldasm/.slddrw native, .ipt/.CATPart/STEP/IGES/Parasolid imported as a part via 3D Interconnect)",
-    "as_assembly": "boolean (optional, default false - foreign files only: import an assembly STEP as a real ASSEMBLY via 3D Interconnect instead of the classic multibody-part import; NOTE on this install OpenDoc6-via-Interconnect currently fails with swFileRequiresRepairError - the fallback path for assembly ground truth is per-part import + STEP-parsed placements)"
+    "as_assembly": "boolean (optional, default false - foreign files only: import an assembly STEP as a real ASSEMBLY via 3D Interconnect instead of the classic multibody-part import; NOTE on this install OpenDoc6-via-Interconnect currently fails with swFileRequiresRepairError - the fallback path for assembly ground truth is per-part import + STEP-parsed placements)",
+    "lightweight": "boolean (optional, .sldasm only - true opens components lightweight, false fully resolved (OpenDoc7 with IDocumentSpecification.LightWeight); omitted = SolidWorks' setting)"
    }
   },
-  "output": "→ see execution-response.json — CadState.ActiveDocument = opened doc title; DocumentType = PART/ASSEMBLY/DRAWING; Features[0] = file name"
+  "output": "→ see execution-response.json — CadState.ActiveDocument = opened doc title; DocumentType = PART/ASSEMBLY/DRAWING; Features[0] = file name; Features[1] = 'lightweight_components=N' when an opened assembly has lightweight components"
  },
  "create_sketch": {
   "description": "Creates a new sketch on a plane OR on an existing model face. Default: plane name. With on_face=true, select the face by face_index (PREFERRED — the i-th face from analyze_model(faces); robust on revolve end-caps where a coordinate pick is ambiguous) or by a point (face_x,face_y,face_z) on the planar face. Enables sketching on existing geometry (e.g. a recess/hub on a part face, a bore on a shaft end). Auto-exits any active sketch first.",
@@ -373,7 +374,8 @@
     "include_2d": "boolean (optional, default false — also report 2D sketches)",
     "include_construction": "boolean (optional, default false — count construction geometry in the totals instead of reporting it apart as construction_length_m)",
     "per_segment": "boolean (optional, default false — also list every segment's {kind, length_m, construction})",
-    "include_geometry": "boolean (optional, default false; implies per_segment — each segment also carries start/end [x,y,z], center + radius for arcs, through-points for splines, in meters; part model coordinates, or assembly coordinates (component Transform2 applied) when the active document is an assembly)"
+    "include_geometry": "boolean (optional, default false; implies per_segment — each segment also carries start/end [x,y,z], center + radius for arcs, through-points for splines, in meters; part model coordinates, or assembly coordinates (component Transform2 applied) when the active document is an assembly)",
+    "resolve_lightweight": "boolean (optional, default false - in an assembly, resolve every lightweight component first so it is measured instead of skipped)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string. Part: {document, units:'m', sweeps:[{name, type, suppressed?, profile?, profile_diameter_m?, path, path_length_m, path_segments?, path_edge_count?, path_type?, per_segment?, warning?}], sweep_path_length_m, sketches:[{name, kind:'3d'|'2d', suppressed?, length_m, segments:{<kind>:{count, length_m}}, construction_length_m?, per_segment?}]}. Assembly: {document, units, root:{sweeps, sweep_path_length_m, sketches}, components:[{path, config, instances[], warning?, sweeps, sweep_path_length_m, sketches}], total_sweep_path_length_m (summed over all instances), skipped?:[{name, reason}]}; components with no sweep or reported sketch are omitted."
@@ -414,10 +416,11 @@
    "params": {
     "rebuild": "boolean (optional, default true — force-rebuild the active document first)",
     "recursive": "boolean (optional, default true — also check every loaded component document)",
-    "include_warnings": "boolean (optional, default true)"
+    "include_warnings": "boolean (optional, default true)",
+    "resolve_lightweight": "boolean (optional, default false - ResolveAllLightWeightComponents first so lightweight components are checked)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, documents_checked, errors, warnings, clean, problems:[{document, path, first_instance?, items:[{severity, feature, type, code, meaning, mate_components?}]}], components_not_loaded?:[{component, path}]}."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, documents_checked, errors, warnings, clean, problems:[{document, path, first_instance?, items:[{severity, feature, type, code, meaning, mate_components?}]}], components_not_loaded?:[{component, path, reason: lightweight|not loaded|file missing}], hint?, lightweight_resolved?}."
  },
  "component_status": {
   "description": "Reports the status of components of the active assembly: suppression state (IComponent2.GetSuppression2), visibility, fixed, envelope, referenced configuration, file path and existence, suppressed parent, ExcludeFromBOM, transform and optionally the component's mates (IComponent2.GetMates: name, type, IFeature.GetErrorCode2 error, referenced component instance paths). Components are named (Name2 or instance path) or listed from IAssemblyDoc.GetComponents and filtered by path substring and state. Does NOT increment state_version.",
@@ -762,7 +765,7 @@
   "output": "-> see execution-response.json - Features = [Name2, 'fixed=...', 'transform=[...]']"
  },
  "add_mate": {
-  "description": "Add a mate between two entities in the ACTIVE assembly (AddMate5). Entity selection is INDEX-FIRST (KNOWN-LIMITATIONS #6): each side = (component Name2, kind face|edge, index from analyze_assembly(faces|edges, component)); the entity object is selected directly (IEntity.Select4, mark 1) - no coordinate/name picks. value: METERS for distance, DEGREES for angle (C4 tool boundary). After the mate: EditRebuild3 + response carries the mate feature name and BOTH sides' component transforms (the per-mate stop check). ErrorStatus 1 = success (swAddMateError_e, observed live). Bumps state_version.",
+  "description": "Add a mate between two entities in the ACTIVE assembly (AddMate5). Entity selection is INDEX-FIRST (KNOWN-LIMITATIONS #6): each side = (component Name2, kind face|edge, index from analyze_assembly(faces|edges, component)); the entity object is selected directly (IEntity.Select4, mark 1) - no coordinate/name picks. value: METERS for distance, DEGREES for angle (C4 tool boundary). After the mate: EditRebuild3 + response carries the mate feature name and BOTH sides' component transforms (the per-mate stop check). ErrorStatus 1 = success (swAddMateError_e, observed live). Bumps state_version. Failure handling: What's Wrong is compared before and after the mate; when AddMate5 reports an error (e.g. 5 = over-defined) or the rebuild shows new problems, the new mate is deleted, the assembly rebuilt and the call FAILS with MATE_OVER_DEFINED / ADD_MATE_ERROR / MATE_REBUILD_ERROR (state_version unchanged), unless keep_on_error. Lightweight components are resolved first.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -776,10 +779,11 @@
     "a_index": "integer (required - side A entity index)",
     "b_component": "string (required - side B component Name2)",
     "b_kind": "string (optional, default 'face'): 'face' | 'edge'",
-    "b_index": "integer (required - side B entity index)"
+    "b_index": "integer (required - side B entity index)",
+    "keep_on_error": "boolean (optional, default false - keep a mate SolidWorks rejected (AddMate5 error != 1, or new What's Wrong items after the rebuild) instead of deleting it and failing)"
    }
   },
-  "output": "-> see execution-response.json - Features = ['mate=<name>', 'type=...', 'error_status=...', 'a_transform=[...]', 'b_transform=[...]']"
+  "output": "-> see execution-response.json - Features = ['mate=<name>', 'type=...', 'error_status=...', 'a_transform=[...]', 'b_transform=[...]']; with keep_on_error and a rejected mate also 'error=...', 'mate_problem=...', 'new_problems=[...]'; 'resolved_from_lightweight=[...]' when components were resolved"
  },
  "compare_assemblies": {
   "description": "ADAPTER-ONLY orchestration (no COM case; composes analyze_assembly + analyze_model reads) - the assembly round-trip verifier behind the artifact verified label (ADR-047 B4, criteria RATIFIED): component set EXACT (source basename + config + instance counts, paired by tree-order ordinal) AND every paired component transform within tolerance (position <= 1um, rotation <= 1e-6) AND mate count + type multiset match AND assembly mass properties within the V1 thresholds (|dV| <= 1%, |dA| <= 1%). doc args = absolute .SLDASM path OR open-document title (unsaved rebuilds compare too). The verdict is a REPORT - writing ir.verification stays the caller's job.",
@@ -804,5 +808,35 @@
    }
   },
   "output": "-> see execution-response.json - Features = [file name, 'body_name=<source body name>' when available]"
+ },
+ "check_interference": {
+  "description": "Interference detection in the active assembly (IAssemblyDoc.InterferenceDetectionManager, GetInterferences). With `components`: the named components plus the unsuppressed, visible leaf components whose bounding box (IComponent2.GetBox) comes within `clearance` of theirs are selected, and only interferences involving a named component are kept; lightweight ones among them are resolved. Without: the whole assembly. Optional clearance check: minimum distance (IMeasure, ArcOption 1) from each named component to each neighbour. Read-only; does NOT increment state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "components": "string or array (optional - JSON list of component names / instance paths to check against their neighbours; empty = whole assembly)",
+    "clearance": "number (optional, default 0 - meters; > 0 needs components: report neighbours closer than this)",
+    "treat_coincidence_as_interference": "boolean (optional, default false)",
+    "treat_subassemblies_as_components": "boolean (optional, default false)",
+    "include_hidden": "boolean (optional, default false)",
+    "resolve_lightweight": "boolean (optional, default false - ResolveAllLightWeightComponents before a whole-assembly check)",
+    "limit": "integer (optional, default 100 - max interferences / violations listed)"
+   }
+  },
+  "output": "-> see execution-response.json - CadState.Features holds a single JSON string {assembly, checked, neighbours_checked?, interference_count, interferences:[{components, volume_m3, volume_mm3, box_min?, box_max?, possible_only?}], interferences_truncated_at?, clearance?:{required_m, violation_count, violations:[{a, b, distance_m, distance_mm}], nearest_m?, nearest_pair?, not_measured?}, lightweight_resolved?, resolved_from_lightweight?, lightweight_not_checked?, warning?, clear}."
+ },
+ "import_step": {
+  "description": "Imports a neutral file (STEP / IGES / Parasolid / SAT) through open_document's staged import, saves the import as a .SLDPRT (IModelDocExtension.SaveAs3; an assembly import becomes a multi-body part), closes the import document (ISldWorks.CloseDoc) and reopens the saved part (OpenDoc6) as the active document, so part queries work on it. Refuses to overwrite an existing part unless overwrite. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "file_path": "string (required - the neutral file)",
+    "save_as": "string (optional - .SLDPRT path; default next to the source with the same name)",
+    "overwrite": "boolean (optional, default false - replace an existing save_as file)"
+   }
+  },
+  "output": "-> see execution-response.json - CadState.ActiveDocument = the reopened part; Features[0] = JSON {source, part, imported_as: PART|ASSEMBLY, solid_bodies, surface_bodies?, box_min?, box_max?, size?, warning?}"
  }
 }

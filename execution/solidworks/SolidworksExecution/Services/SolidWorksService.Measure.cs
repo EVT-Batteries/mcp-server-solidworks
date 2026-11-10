@@ -87,6 +87,11 @@ namespace SolidworksExecution.Services
                 }
                 else
                 {
+                    if (p?.Value<bool?>("resolve_lightweight") ?? false)
+                    {
+                        int light = ResolveAllLightweightComponents(modelDoc as IAssemblyDoc);
+                        if (light > 0) result["lightweight_resolved"] = light;
+                    }
                     result["root"] = MeasureDocument(modelDoc, opt);
                     result["components"] = MeasureAssemblyComponents(modelDoc as IAssemblyDoc, opt, result);
                 }
@@ -141,11 +146,20 @@ namespace SolidworksExecution.Services
 
                     string name = comp.Name2;
                     bool suppressed = false;
-                    try { suppressed = comp.IsSuppressed(); } catch { }
+                    suppressed = SafeSuppression(comp) == 0;   // IsSuppressed() is also true for some lightweight components
                     if (suppressed) { skipped.Add(new JObject { ["name"] = name, ["reason"] = "suppressed" }); continue; }
 
                     var doc = comp.GetModelDoc2() as IModelDoc2;
-                    if (doc == null) { skipped.Add(new JObject { ["name"] = name, ["reason"] = "not loaded (lightweight?)" }); continue; }
+                    if (doc == null)
+                    {
+                        skipped.Add(new JObject
+                        {
+                            ["name"] = name,
+                            ["reason"] = IsLightweightState(SafeSuppression(comp))
+                                ? "lightweight (pass resolve_lightweight=true to measure it)" : "not loaded",
+                        });
+                        continue;
+                    }
 
                     string path = "";
                     try { path = comp.GetPathName(); } catch { }

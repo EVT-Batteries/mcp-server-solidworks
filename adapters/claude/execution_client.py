@@ -2,24 +2,28 @@ import os
 import subprocess
 import threading
 import time
+
 import httpx
-from config import (
-    EXECUTE_ENDPOINT,
-    STATE_ENDPOINT,
-    HEALTH_ENDPOINT,
-    ENSURE_ENDPOINT,
-    HTTP_TIMEOUT,
-    ENSURE_TIMEOUT,
-    CONNECT_TIMEOUT,
-    EXECUTION_EXE_PATH,
-    SERVER_SPAWN_TIMEOUT,
-)
 from adapter_log import write as _log
+from config import (
+    CONNECT_TIMEOUT,
+    ENSURE_ENDPOINT,
+    ENSURE_TIMEOUT,
+    EXECUTE_ENDPOINT,
+    EXECUTION_EXE_PATH,
+    HEALTH_ENDPOINT,
+    HTTP_TIMEOUT,
+    SERVER_SPAWN_TIMEOUT,
+    STATE_ENDPOINT,
+)
+from mcp.server.mcpserver.exceptions import ToolError
 
 
-class ExecutionLayerError(Exception):
-    """Raised when the execution layer returns an unexpected HTTP error."""
-    pass
+class ExecutionLayerError(ToolError):
+    """Raised when the execution layer cannot be reached, times out or answers an HTTP error.
+
+    A ToolError, so the MCP SDK passes its message to the model (any other exception type is
+    reduced to a bare "Error executing tool <name>")."""
 
 
 # Serializes auto-start so two concurrent tool calls hitting a down server don't each
@@ -200,13 +204,16 @@ def get_state() -> int:
     return sv
 
 
-def call_tool(tool_name: str, operation_id: str, state_version: int, params: dict) -> dict:
+def call_tool(tool_name: str, operation_id: str, state_version: int, params: dict,
+              timeout: float | None = None) -> dict:
     """
     POST /api/tool/execute on the solidworks-execution layer.
 
     Returns the parsed JSON response body on HTTP 200.
-    Raises ExecutionLayerError on HTTP 400 or unexpected status codes.
+    Raises ExecutionLayerError on HTTP 400 or unexpected status codes, and on a timeout
+    (`timeout` seconds, default HTTP_TIMEOUT).
     """
+    budget = timeout or HTTP_TIMEOUT
     payload = {
         "operationId": operation_id,
         "tool": tool_name,
@@ -217,19 +224,33 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     _log(f"-> {tool_name} op={operation_id} sv={state_version}")
 
     def _do():
-        with _http_client(timeout=HTTP_TIMEOUT) as client:
+        with _http_client(timeout=budget) as client:
             return client.post(EXECUTE_ENDPOINT, json=payload)
 
     try:
         response = _request_with_autostart(_do, tool_name)
     except httpx.TimeoutException:
-        _log(f"<- {tool_name} TIMEOUT after {HTTP_TIMEOUT}s")
+        _log(f"<- {tool_name} TIMEOUT after {budget}s")
         raise ExecutionLayerError(
-            f"Request to solidworks-execution timed out after {HTTP_TIMEOUT}s."
+            f"TIMEOUT | {tool_name} got no answer from solidworks-execution within {budget:g} s. "
+            "SolidWorks is probably still working on it (calls run one at a time, so the next "
+            "call waits for it): wait, then check the result (verify_state, component_status, "
+            "check_rebuild) before retrying, since a model-changing call may still complete. "
+            "Raise HTTP_TIMEOUT / LONG_HTTP_TIMEOUT in adapters/claude/.env for long calls, or "
+            "narrow the call (e.g. name the components)."
+        )
+    except httpx.HTTPError as ex:
+        _log(f"<- {tool_name} HTTP_ERROR {type(ex).__name__}: {ex}")
+        raise ExecutionLayerError(
+            f"CONNECTION_LOST | {tool_name}: {type(ex).__name__}: {ex}. The execution server "
+            "may have crashed or been restarted; call ensure_ready, then check the model state."
         )
 
     if response.status_code == 400:
-        body = response.json()
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
         _log(f"<- {tool_name} HTTP_400 {body.get('error', '')}")
         raise ExecutionLayerError(f"Bad request: {body.get('error', response.text)}")
 

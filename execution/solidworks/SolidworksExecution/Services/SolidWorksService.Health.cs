@@ -56,11 +56,15 @@ namespace SolidworksExecution.Services
                 bool rebuild = p?.Value<bool?>("rebuild") ?? true;
                 bool recursive = p?.Value<bool?>("recursive") ?? true;
                 bool includeWarnings = p?.Value<bool?>("include_warnings") ?? true;
+                bool resolveLightweight = p?.Value<bool?>("resolve_lightweight") ?? false;
 
                 var top = _solidWorks.IActiveDoc2 as IModelDoc2;
                 if (top == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+
+                // Lightweight components have no loaded model: their features cannot be checked.
+                int resolvedLight = resolveLightweight && top is IAssemblyDoc la ? ResolveAllLightweightComponents(la) : 0;
 
                 if (rebuild) top.ForceRebuild3(false);
 
@@ -74,12 +78,18 @@ namespace SolidworksExecution.Services
                     {
                         if (!(o is IComponent2 c)) continue;
                         bool suppressed = false;
-                        try { suppressed = c.IsSuppressed(); } catch { }
+                        suppressed = SafeSuppression(c) == 0;   // IsSuppressed() is also true for some lightweight components
                         if (suppressed) continue;
                         var d = c.GetModelDoc2() as IModelDoc2;
                         if (d == null)
                         {
-                            notLoaded.Add(new JObject { ["component"] = ComponentPath(c), ["path"] = SafeComponentPath(c) });
+                            notLoaded.Add(new JObject
+                            {
+                                ["component"] = ComponentPath(c),
+                                ["path"] = SafeComponentPath(c),
+                                ["reason"] = IsLightweightState(SafeSuppression(c)) ? "lightweight"
+                                    : FileExists(c) ? "not loaded" : "file missing",
+                            });
                             continue;
                         }
                         if (seen.Add(SafePath(d))) docs.Add(new KeyValuePair<IModelDoc2, string>(d, ComponentPath(c)));
@@ -111,7 +121,15 @@ namespace SolidworksExecution.Services
                     ["clean"] = errors == 0 && (warnings == 0 || !includeWarnings) && notLoaded.Count == 0,
                     ["problems"] = report,
                 };
-                if (notLoaded.Count > 0) result["components_not_loaded"] = notLoaded;
+                if (notLoaded.Count > 0)
+                {
+                    result["components_not_loaded"] = notLoaded;
+                    int light = 0;
+                    foreach (var nl in notLoaded) if ((string)nl["reason"] == "lightweight") light++;
+                    if (light > 0)
+                        result["hint"] = light + " lightweight component(s) were not checked: pass resolve_lightweight=true to load and check them.";
+                }
+                if (resolvedLight > 0) result["lightweight_resolved"] = resolvedLight;
 
                 return new ExecutionResponse
                 {
@@ -154,7 +172,7 @@ namespace SolidworksExecution.Services
             for (int i = 0; i < fa.Length; i++)
             {
                 var f = fa[i] as IFeature;
-                int code = ca != null && i < ca.Length ? ca[i] : -1;
+                int code = BetterErrorCode(f, ca != null && i < ca.Length ? ca[i] : -1);
                 bool isWarning = wa != null && i < wa.Length && wa[i];
                 if (isWarning && !includeWarnings) continue;
                 if (isWarning) warnings++; else errors++;

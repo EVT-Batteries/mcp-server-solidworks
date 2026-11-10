@@ -45,17 +45,16 @@ namespace SolidworksExecution.Services
                         "MISSING_PARAMETER", "component (Name2 from analyze_assembly) is required.");
 
                 IComponent2 comp = null;
-                var names = new List<string>();
                 if (asm.GetComponents(false) is object[] comps)
                     foreach (var o in comps)
-                        if (o is IComponent2 c)
-                        {
-                            names.Add(c.Name2);
-                            if (comp == null && string.Equals(c.Name2, name, StringComparison.OrdinalIgnoreCase)) comp = c;
-                        }
+                        if (o is IComponent2 c && string.Equals(c.Name2, name, StringComparison.OrdinalIgnoreCase)) { comp = c; break; }
+                if (comp == null) comp = FindComponentByName(asm, name);
                 if (comp == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "COMPONENT_NOT_FOUND", $"No component '{name}'. Available: {string.Join(", ", names)}");
+                        "COMPONENT_NOT_FOUND", ComponentNotFoundMessage(asm, name));
+                if (SafeSuppression(comp) == 0)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "COMPONENT_SUPPRESSED", $"'{ComponentPath(comp)}' is suppressed: resolve it with set_component_state before placing it.");
 
                 if (!string.IsNullOrEmpty(transformJson) && transformJson != "[]")
                 {

@@ -351,8 +351,24 @@ namespace SolidworksExecution.Services
                 }
 
                 int errors = 0, warnings = 0;
-                var modelDoc = _solidWorks.OpenDoc6(filePath, docType,
-                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent, "", ref errors, ref warnings) as IModelDoc2;
+                IModelDoc2 modelDoc;
+                // lightweight (assemblies only): true opens the components lightweight, false fully
+                // resolved; left out, SolidWorks' own setting decides.
+                bool? lightweight = p["lightweight"] == null || p["lightweight"].Type == JTokenType.Null
+                    ? (bool?)null : p.Value<bool>("lightweight");
+                if (lightweight.HasValue && ext == ".sldasm")
+                {
+                    var spec = _solidWorks.GetOpenDocSpec(filePath) as IDocumentSpecification;
+                    spec.DocumentType = docType;
+                    spec.Silent = true;
+                    spec.UseLightWeightDefault = false;
+                    spec.LightWeight = lightweight.Value;
+                    modelDoc = _solidWorks.OpenDoc7(spec) as IModelDoc2;
+                    errors = spec.Error; warnings = spec.Warning;
+                }
+                else
+                    modelDoc = _solidWorks.OpenDoc6(filePath, docType,
+                        (int)swOpenDocOptions_e.swOpenDocOptions_Silent, "", ref errors, ref warnings) as IModelDoc2;
 
                 // FOREIGN-FORMAT staged fallback (2026-07-09, proven live): with 3D Interconnect OFF,
                 // OpenDoc6 does NOT import foreign files — it returns null with the misleading
@@ -435,6 +451,13 @@ namespace SolidworksExecution.Services
                         $"Opened '{modelDoc.GetTitle()}' but could not make it the ACTIVE document " +
                         $"(active is '{nowActive?.GetTitle()}').");
 
+                var openInfo = new List<string> { System.IO.Path.GetFileName(filePath) };
+                if (modelDoc is IAssemblyDoc openedAsm)
+                {
+                    int light = LightweightCount(openedAsm);
+                    if (light > 0) openInfo.Add("lightweight_components=" + light);
+                }
+
                 var response = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
@@ -447,7 +470,7 @@ namespace SolidworksExecution.Services
                         ActiveDocument = modelDoc.GetTitle(),
                         DocumentType = typeName,
                         ActiveSketch = null,
-                        Features = new List<string> { System.IO.Path.GetFileName(filePath) },
+                        Features = openInfo,
                         Dimensions = new List<string>()
                     },
                     Error = null

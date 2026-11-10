@@ -108,7 +108,11 @@ namespace SolidworksExecution.Services
                     ["components"] = list,
                 };
                 if (counts.Count > 0) result["counts_by_state"] = counts;
-                if (missing.Count > 0) result["not_found"] = missing;
+                if (missing.Count > 0)
+                {
+                    result["not_found"] = missing;
+                    result["not_found_hint"] = ComponentNotFoundMessage(asm, (string)missing[0]);
+                }
                 if (wanted.Count == 0 && list.Count >= limit) result["truncated_at"] = limit;
 
                 return ReadOnlyResponse(request, modelDoc, result);
@@ -181,7 +185,7 @@ namespace SolidworksExecution.Services
                 if (missing.Count > 0)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "COMPONENT_NOT_FOUND", "Not found (nothing changed): " + string.Join(", ", missing.ToObject<string[]>())
-                        + ". Use component_status(match=...) to list instance paths.");
+                        + ". " + ComponentNotFoundMessage(asm, (string)missing[0]));
 
                 var changes = new JArray();
                 bool anyFailed = false;
