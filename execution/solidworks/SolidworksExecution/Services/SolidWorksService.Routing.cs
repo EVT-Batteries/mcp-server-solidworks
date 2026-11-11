@@ -70,6 +70,18 @@ namespace SolidworksExecution.Services
                         catch { }
                     }
                     o["file_locations"] = loc;
+                    try
+                    {
+                        rs.GetFromToListHeaderDefinitions(out string w, out string fr, out string fp, out string fpn, out string tr,
+                            out string tp, out string tpn, out string cab, out string core, out string col, out string spec, out string oth);
+                        o["from_to_headers"] = new JObject
+                        {
+                            ["wire"] = w, ["from_ref"] = fr, ["from_pin"] = fp, ["from_partno"] = fpn,
+                            ["to_ref"] = tr, ["to_pin"] = tp, ["to_partno"] = tpn, ["cable"] = cab,
+                            ["core"] = core, ["color"] = col, ["spec"] = spec, ["other"] = oth,
+                        };
+                    }
+                    catch (Exception ex) { o["from_to_headers_error"] = ex.Message; }
                 }
             }
             catch (Exception ex) { o["file_locations_error"] = ex.Message; }
@@ -496,8 +508,10 @@ namespace SolidworksExecution.Services
             {
                 string t = "";
                 try { t = f.GetTypeName2() ?? ""; } catch { }
-                if (t.IndexOf("route", StringComparison.OrdinalIgnoreCase) >= 0 && t != "Reference"
-                    || (f.Name ?? "").StartsWith("Route", StringComparison.OrdinalIgnoreCase))
+                // "Route Parts" etc. are folders (FtrFolder); the route feature is "Route1".
+                if (t != "FtrFolder" && t != "Reference"
+                    && (t.IndexOf("route", StringComparison.OrdinalIgnoreCase) >= 0
+                        || System.Text.RegularExpressions.Regex.IsMatch(f.Name ?? "", @"^Route\d+$")))
                     return f;
                 f = f.GetNextFeature() as IFeature;
             }
@@ -690,6 +704,159 @@ namespace SolidworksExecution.Services
                 }
                 result["steps"] = steps;
                 if (warnings.Count > 0) result["warnings"] = warnings;
+
+                var response = new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "COMPLETED",
+                    Verified = true,
+                    StateVersion = _guard.GetCurrentStateVersion() + 1,
+                    CadState = new CadState
+                    {
+                        StateVersion = _guard.GetCurrentStateVersion() + 1,
+                        ActiveDocument = doc.GetTitle(),
+                        DocumentType = "ASSEMBLY",
+                        ActiveSketch = null,
+                        Features = new List<string> { result.ToString(Newtonsoft.Json.Formatting.None) },
+                        Dimensions = new List<string>()
+                    },
+                    Error = null
+                };
+                _guard.RegisterCompleted(request.OperationId, response);
+                return response;
+            }
+            catch (COMException ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
+            }
+        }
+
+        // import_from_to: wires from a from-to list into the routes of the active assembly.
+        // references: {component instance: reference designator} set first (Routing matches the
+        // list's From/To Ref to IComponent2.ComponentReference). Accepts the PropertyManager pages
+        // the import opens (Route Properties, Auto Route) with up to press_ok RunCommand(PmOK),
+        // optionally RouteWires on the named route, and reports its wires with cut lengths.
+        public ExecutionResponse ImportFromTo(ToolRequest request)
+        {
+            if (_guard.IsDuplicate(request.OperationId))
+                return _guard.GetDuplicate(request.OperationId);
+            if (!_guard.IsStateVersionValid(request.StateVersion))
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
+            if (!EnsureConnected())
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            try
+            {
+                var p = request.Params as JObject;
+                string fromTo = p?.Value<string>("from_to") ?? "";
+                string compLib = p?.Value<string>("component_library") ?? "";
+                string cableLib = p?.Value<string>("cable_library") ?? "";
+                bool useExisting = p?.Value<bool?>("use_existing_assembly") ?? true;
+                bool overwrite = p?.Value<bool?>("overwrite") ?? true;
+                bool searchSubs = p?.Value<bool?>("search_sub_assemblies") ?? true;
+                int pressOk = p?.Value<int?>("press_ok") ?? 3;
+                string routeName = p?.Value<string>("route") ?? "";
+                bool routeWires = p?.Value<bool?>("route_wires") ?? true;
+                string refsJson = p?.Value<string>("references") ?? "{}";
+
+                foreach (var f in new[] { fromTo, compLib, cableLib })
+                    if (!string.IsNullOrEmpty(f) && !System.IO.File.Exists(f))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "FILE_NOT_FOUND", "Not found: " + f);
+                if (string.IsNullOrEmpty(fromTo))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "INVALID_PARAMETER", "from_to (the from-to list .xlsx) is required.");
+
+                var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
+                var asm = doc as IAssemblyDoc;
+                if (asm == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "WRONG_DOCUMENT_TYPE", "import_from_to needs the top assembly active.");
+                var rm = asm.GetRouteManager() as IRouteManager;
+                if (rm == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "ROUTING_NOT_LOADED", "No RouteManager: load the SOLIDWORKS Routing add-in.");
+
+                var steps = new JArray();
+                var warnings = new JArray();
+                var refs = JObject.Parse(refsJson);
+                foreach (var kv in refs)
+                {
+                    var c = FindComponentByName(asm, kv.Key);
+                    if (c == null) { warnings.Add("component not found: " + kv.Key); continue; }
+                    c.ComponentReference = (string)kv.Value;
+                    steps.Add($"{ComponentPath(c)} reference = {c.ComponentReference}");
+                }
+
+                bool editRouteFirst = p?.Value<bool?>("edit_route_first") ?? false;
+                doc.ClearSelection2(true);
+                if (editRouteFirst && !string.IsNullOrEmpty(routeName))
+                {
+                    var rc = FindComponentByName(asm, routeName);
+                    var rf = rc != null ? RouteFeatureOf(rc) : null;
+                    if (rf == null) warnings.Add("edit_route_first: route feature not found");
+                    else
+                    {
+                        steps.Add($"select {rf.Name}: " + rf.Select2(false, 0));
+                        rm.EditRoute();
+                        steps.Add("EditRoute");
+                        doc.ClearSelection2(true);
+                    }
+                }
+                bool imported = rm.ImportFromToList(fromTo, compLib, cableLib, useExisting, overwrite, searchSubs);
+                steps.Add("ImportFromToList: " + imported);
+                for (int i = 0; i < pressOk; i++)
+                {
+                    bool ok = _solidWorks.RunCommand(-2 /* swCommands_PmOK */, "");
+                    steps.Add($"RunCommand(PmOK) #{i + 1}: {ok}");
+                    if (!ok) break;
+                }
+                try { steps.Add("edit_target: " + (asm.GetEditTarget() as IModelDoc2)?.GetTitle()); } catch { }
+
+                var result = new JObject();
+                IComponent2 routeComp = string.IsNullOrEmpty(routeName) ? RouteBeingEdited(asm) : FindComponentByName(asm, routeName);
+                // Leave any route / component editing before reading.
+                try { rm.ExitRoute(); } catch { }
+                try { if (asm.GetEditTarget() as IModelDoc2 != doc) asm.EditAssembly(); } catch { }
+
+                if (routeComp != null)
+                {
+                    if (routeWires)
+                    {
+                        var routeAsm = routeComp.GetModelDoc2() as IAssemblyDoc;
+                        var rrm = routeAsm?.GetRouteManager() as IRouteManager;
+                        doc.ClearSelection2(true);
+                        routeComp.Select4(false, null, false);
+                        asm.EditAssembly();
+                        try
+                        {
+                            var er = rrm?.GetElectricalRoute() as IElectricalRoute;
+                            if (er == null) warnings.Add("no electrical route in " + ComponentPath(routeComp));
+                            else steps.Add("RouteWires: " + er.RouteWires());
+                        }
+                        finally { try { asm.EditAssembly(); } catch { } }
+                    }
+                    result["route"] = ReadElectricalRoute(doc, asm, routeComp);
+                }
+                var routes = new JArray();
+                if (asm.GetComponents(false) is object[] all)
+                    foreach (var c in all)
+                    {
+                        var cc = c as IComponent2;
+                        var sub = cc?.GetModelDoc2() as IAssemblyDoc;
+                        bool isRoute = false;
+                        try { isRoute = sub != null && sub.IsRouteAssembly(); } catch { }
+                        if (isRoute) routes.Add(ComponentPath(cc));
+                    }
+                result["route_assemblies"] = routes;
+                result["steps"] = steps;
+                if (warnings.Count > 0) result["warnings"] = warnings;
+                try { doc.ForceRebuild3(false); } catch { }
 
                 var response = new ExecutionResponse
                 {
