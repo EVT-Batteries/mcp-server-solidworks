@@ -33,6 +33,7 @@ namespace SolidworksExecution.Services
             public bool IncludeConstruction; // add construction geometry to the totals
             public bool PerSegment;          // list every segment's kind + length
             public bool IncludeGeometry;     // per segment: 3D start / end / center / spline points
+            public bool AsRoute;             // per sketch: route_points + route_bend_radii (create_3d_path input)
             public IMathTransform Frame;     // component -> assembly transform while measuring a component
         }
 
@@ -59,6 +60,7 @@ namespace SolidworksExecution.Services
                     IncludeConstruction = p?.Value<bool?>("include_construction") ?? false,
                     PerSegment = p?.Value<bool?>("per_segment") ?? false,
                     IncludeGeometry = p?.Value<bool?>("include_geometry") ?? false,
+                    AsRoute = p?.Value<bool?>("as_route") ?? false,
                 };
                 if (opt.IncludeGeometry) opt.PerSegment = true;
 
@@ -75,7 +77,7 @@ namespace SolidworksExecution.Services
                 var result = new JObject();
                 result["document"] = modelDoc.GetTitle();
                 result["units"] = "m";
-                if (opt.IncludeGeometry)
+                if (opt.IncludeGeometry || opt.AsRoute)
                     result["frame"] = docType == (int)swDocumentTypes_e.swDocPART
                         ? "part model coordinates"
                         : "assembly coordinates (component transforms applied)";
@@ -185,7 +187,7 @@ namespace SolidworksExecution.Services
                                            $"not the referenced '{refConfig}'";
                     entry["instances"] = new JArray(name);
 
-                    try { opt.Frame = opt.IncludeGeometry ? comp.Transform2 as IMathTransform : null; } catch { opt.Frame = null; }
+                    try { opt.Frame = (opt.IncludeGeometry || opt.AsRoute) ? comp.Transform2 as IMathTransform : null; } catch { opt.Frame = null; }
                     JObject measured;
                     try { measured = MeasureDocument(doc, opt); }
                     finally { opt.Frame = null; }
@@ -297,6 +299,8 @@ namespace SolidworksExecution.Services
                 sj["path_length_m"] = kj["length_m"];
                 sj["path_segments"] = kj["segments"];
                 if (opt.PerSegment && kj["per_segment"] != null) sj["per_segment"] = kj["per_segment"];
+                foreach (var key in new[] { "route_points", "route_bend_radii", "route_warning" })
+                    if (kj[key] != null) sj[key] = kj[key];
                 return sj;
             }
 
@@ -378,8 +382,124 @@ namespace SolidworksExecution.Services
             j["segments"] = segJ;
             if (!opt.IncludeConstruction && construction > 0) j["construction_length_m"] = Math.Round(construction, 6);
             if (perSeg != null) j["per_segment"] = perSeg;
+            if (opt.AsRoute) AddRoute(j, sketch, segs, opt.Frame);
             return j;
         }
+
+        // Route form of a line / arc chain: the corner points (where each arc's two tangents meet, and
+        // the junctions of lines meeting without an arc) and one bend radius per corner (0 = sharp),
+        // i.e. exactly what create_3d_path(points, bend_radii) takes, so a route can be read, edited
+        // and redrawn. Construction geometry is ignored; splines or a broken chain give route_warning.
+        private void AddRoute(JObject j, ISketch sketch, object[] segs, IMathTransform frame)
+        {
+            var pieces = new List<RoutePiece>();
+            bool unsupported = false;
+            IMathTransform sketchToModel = null;
+            bool is3D = false;
+            try { is3D = sketch.Is3D(); } catch { }
+            if (!is3D) { try { sketchToModel = sketch.ModelToSketchTransform?.Inverse() as IMathTransform; } catch { } }
+            if (segs != null)
+                foreach (var o in segs)
+                {
+                    var seg = o as ISketchSegment;
+                    if (seg == null) continue;
+                    bool constr = false;
+                    try { constr = seg.ConstructionGeometry; } catch { }
+                    if (constr) continue;
+                    if (seg is ISketchLine ln)
+                        pieces.Add(new RoutePiece
+                        {
+                            S = Pt(PointArray(ln.GetStartPoint2() as ISketchPoint, sketchToModel, frame)),
+                            E = Pt(PointArray(ln.GetEndPoint2() as ISketchPoint, sketchToModel, frame)),
+                        });
+                    else if (seg is ISketchArc ar)
+                        pieces.Add(new RoutePiece
+                        {
+                            S = Pt(PointArray(ar.GetStartPoint2() as ISketchPoint, sketchToModel, frame)),
+                            E = Pt(PointArray(ar.GetEndPoint2() as ISketchPoint, sketchToModel, frame)),
+                            C = Pt(PointArray(ar.GetCenterPoint2() as ISketchPoint, sketchToModel, frame)),
+                            R = ar.GetRadius(),
+                        });
+                    else if (seg.GetType() != (int)swSketchSegments_e.swSketchTEXT) unsupported = true;
+                }
+            if (pieces.Count == 0 || pieces.Exists(pc => pc.S == null || pc.E == null)) return;
+
+            string warning = unsupported ? "the sketch has segments other than lines and arcs (left out)" : null;
+            var chain = OrderChain(pieces, out bool broken);
+            if (broken) warning = (warning == null ? "" : warning + "; ") + "the segments do not form one connected chain";
+
+            var points = new JArray();
+            var radii = new JArray();
+            points.Add(RoundPt(chain[0].S));
+            for (int i = 0; i < chain.Count; i++)
+            {
+                var pc = chain[i];
+                if (pc.C != null)
+                {
+                    double[] a = V(pc.S, pc.C), b = V(pc.E, pc.C);
+                    double r = pc.R, cosPhi = Math.Max(-1, Math.Min(1, Dot3(a, b) / (r * r)));
+                    double phi = Math.Acos(cosPhi);
+                    double[] n = Unit3(Cross(a, b));
+                    if (phi > Math.PI - 1e-4 || Norm(n) < 0.5)
+                    {
+                        warning = (warning == null ? "" : warning + "; ") + $"arc {i} spans ~180°: its corner is undefined";
+                        points.Add(RoundPt(pc.E)); radii.Add(0.0);
+                        continue;
+                    }
+                    double[] t = Unit3(Cross(n, a));
+                    double tl = r * Math.Tan(phi / 2.0);
+                    points.Add(RoundPt(new[] { pc.S[0] + t[0] * tl, pc.S[1] + t[1] * tl, pc.S[2] + t[2] * tl }));
+                    radii.Add(Math.Round(r, 6));
+                }
+                else if (i + 1 < chain.Count && chain[i + 1].C == null)
+                {
+                    // two lines meeting without an arc: a sharp corner, unless they are collinear
+                    double[] d1 = Unit3(V(pc.E, pc.S)), d2 = Unit3(V(chain[i + 1].E, chain[i + 1].S));
+                    if (Dot3(d1, d2) < 1 - 1e-9) { points.Add(RoundPt(pc.E)); radii.Add(0.0); }
+                }
+            }
+            points.Add(RoundPt(chain[chain.Count - 1].E));
+            j["route_points"] = points;
+            j["route_bend_radii"] = radii;
+            if (warning != null) j["route_warning"] = warning;
+        }
+
+        private sealed class RoutePiece { public double[] S, E, C; public double R; }
+
+        // Orders the pieces into one chain from a free end, flipping pieces as needed.
+        private static List<RoutePiece> OrderChain(List<RoutePiece> pieces, out bool broken)
+        {
+            const double tol = 1e-6;
+            bool Same(double[] p, double[] q) => Norm(V(p, q)) < tol;
+            int Degree(double[] p) { int d = 0; foreach (var pc in pieces) { if (Same(pc.S, p)) d++; if (Same(pc.E, p)) d++; } return d; }
+
+            var left = new List<RoutePiece>(pieces);
+            RoutePiece first = left.Find(pc => Degree(pc.S) == 1) ?? left.Find(pc => Degree(pc.E) == 1) ?? left[0];
+            if (Degree(first.S) != 1 && Degree(first.E) == 1) Flip(first);
+            var chain = new List<RoutePiece> { first };
+            left.Remove(first);
+            while (left.Count > 0)
+            {
+                var end = chain[chain.Count - 1].E;
+                var next = left.Find(pc => Same(pc.S, end) || Same(pc.E, end));
+                if (next == null) break;
+                if (!Same(next.S, end)) Flip(next);
+                chain.Add(next);
+                left.Remove(next);
+            }
+            broken = left.Count > 0;
+            return chain;
+        }
+
+        private static void Flip(RoutePiece pc) { var t = pc.S; pc.S = pc.E; pc.E = t; }
+        private static double[] Pt(JArray a) => a == null ? null : new[] { a[0].Value<double>(), a[1].Value<double>(), a[2].Value<double>() };
+        private static JArray RoundPt(double[] p) => new JArray(Math.Round(p[0], 6), Math.Round(p[1], 6), Math.Round(p[2], 6));
+        private static double[] V(double[] p, double[] q) => new[] { p[0] - q[0], p[1] - q[1], p[2] - q[2] };
+        private static double Dot3(double[] a, double[] b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        private static double Norm(double[] a) => Math.Sqrt(Dot3(a, a));
+        private static double[] Unit3(double[] a) { double l = Norm(a); return l < 1e-15 ? a : new[] { a[0] / l, a[1] / l, a[2] / l }; }
+        private static double[] Cross(double[] a, double[] b) =>
+            new[] { a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
 
         // Segment geometry in model coordinates (a 2D sketch's points are mapped out of the sketch
         // plane), then into assembly coordinates when `frame` (a component transform) is given.

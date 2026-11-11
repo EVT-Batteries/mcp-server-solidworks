@@ -360,6 +360,8 @@ def check_interference(
     include_hidden: bool = False,
     resolve_lightweight: bool = False,
     limit: Annotated[int, Field(ge=1)] = 100,
+    compact: bool = False,
+    ignore_same_parent: bool = False,
 ) -> str:
     """Interference detection in the ACTIVE assembly (read-only: does NOT change state_version,
     never saves).
@@ -378,13 +380,19 @@ def check_interference(
     Returns interference_count, interferences (largest first: components, volume_mm3,
     box_min / box_max of the overlap, m), clearance {required_m, violations [{a, b,
     distance_mm}], nearest_m, nearest_pair}, neighbours_checked, warning when something could not
-    be checked, and `clear` (true = no interference, no clearance violation, nothing skipped)."""
+    be checked, and `clear` (true = no interference, no clearance violation, nothing skipped).
+    compact: on a large assembly, report counts instead of the long lists: not_measured_count +
+    not_measured_neighbours (pairs Measure could not size, usually surface-only models) and
+    resolved_from_lightweight_count.
+    ignore_same_parent: leave out interferences and clearance violations whose components all
+    sit in the same sub-assembly (e.g. a harness's own bundles meeting at their split points);
+    reported as ignored_same_parent."""
     return _call("check_interference", {
         "components": components, "clearance": clearance,
         "treat_coincidence_as_interference": treat_coincidence_as_interference,
         "treat_subassemblies_as_components": treat_subassemblies_as_components,
         "include_hidden": include_hidden, "resolve_lightweight": resolve_lightweight,
-        "limit": limit})
+        "limit": limit, "compact": compact, "ignore_same_parent": ignore_same_parent})
 
 
 # ---------------------------------------------------------------------------
@@ -1258,6 +1266,7 @@ def measure_curves(
     per_segment: bool = False,
     include_geometry: bool = False,
     resolve_lightweight: bool = False,
+    as_route: bool = False,
 ) -> str:
     """Measure curve LENGTHS in the active part or assembly (read-only, does NOT change state).
     Reports every SWEEP (path sketch or edges, path length, profile sketch and, for a single-circle
@@ -1281,12 +1290,18 @@ def measure_curves(
         model coordinates, or ASSEMBLY coordinates (component transform applied) when the active
         document is an assembly — read a route here, edit it, and redraw it with create_3d_path.
     resolve_lightweight: in an assembly, resolve every lightweight component first so it is
-        measured instead of skipped (reported as lightweight_resolved)."""
+        measured instead of skipped (reported as lightweight_resolved).
+    as_route: per sketch and sweep path, also return route_points (the corner points: where each
+        arc's two tangents meet, and junctions of lines meeting without an arc) and
+        route_bend_radii (one per corner, 0 = sharp), in the same coordinates as include_geometry:
+        exactly the points / bend_radii create_3d_path takes, so a route can be read, edited and
+        redrawn. route_warning when the sketch has splines or is not one connected chain."""
     return _call("measure_curves", {"name": name, "include_2d": include_2d,
                                     "resolve_lightweight": resolve_lightweight,
                                     "include_construction": include_construction,
                                     "per_segment": per_segment,
-                                    "include_geometry": include_geometry})
+                                    "include_geometry": include_geometry,
+                                    "as_route": as_route})
 
 
 # ---------------------------------------------------------------------------

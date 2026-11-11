@@ -38,6 +38,13 @@ namespace SolidworksExecution.Services
                 bool resolveAll = p?.Value<bool?>("resolve_lightweight") ?? false;
                 double clearance = p?.Value<double?>("clearance") ?? 0.0;
                 int limit = p?.Value<int?>("limit") ?? 100;
+                // compact: counts instead of the long lists (pairs that could not be measured, components
+                // resolved from lightweight); ignore_same_parent: drop interferences / clearance
+                // violations between components of one sub-assembly (e.g. a harness's own bundles at
+                // their split points), reported as a count instead.
+                bool compact = p?.Value<bool?>("compact") ?? false;
+                bool ignoreSameParent = p?.Value<bool?>("ignore_same_parent") ?? false;
+                int ignoredSameParent = 0;
 
                 modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = modelDoc as IAssemblyDoc;
@@ -133,6 +140,7 @@ namespace SolidworksExecution.Services
                                         .Where(t => t != null).Distinct().Count() > 1;
                                     if (!inside || !(outside || twoTargets)) continue;
                                 }
+                                if (ignoreSameParent && SameParent(paths)) { ignoredSameParent++; continue; }
                                 total++;
                                 for (int i = 0; i < paths.Count; i++)
                                     for (int k = 0; k < paths.Count; k++)
@@ -182,6 +190,7 @@ namespace SolidworksExecution.Services
                         {
                             string np = ComponentPath(n);
                             // Measure fails on intersecting bodies: an interfering pair is at 0.
+                            if (ignoreSameParent && SameParent(new List<string> { tp, np })) continue;
                             double d = interfering.Contains(tp + "|" + np) ? 0.0 : MinimumDistance(modelDoc, t, n);
                             if (d < 0) { unmeasured.Add(tp + " | " + np); continue; }
                             if (d < nearest) { nearest = d; nearestPair = tp + " | " + np; }
@@ -209,15 +218,28 @@ namespace SolidworksExecution.Services
                         cj["nearest_m"] = Math.Round(nearest, 6);
                         cj["nearest_pair"] = nearestPair;
                     }
-                    if (unmeasured.Count > 0) cj["not_measured"] = unmeasured;
+                    if (unmeasured.Count > 0)
+                    {
+                        if (compact)
+                        {
+                            // Usually surface-only models (no solid to measure): name the neighbours once.
+                            cj["not_measured_count"] = unmeasured.Count;
+                            cj["not_measured_neighbours"] = new JArray(unmeasured
+                                .Select(u => u.ToString().Split(new[] { " | " }, StringSplitOptions.None).Last())
+                                .Distinct().Take(20).ToArray());
+                        }
+                        else cj["not_measured"] = unmeasured;
+                    }
                     result["clearance"] = cj;
                 }
+                if (ignoredSameParent > 0) result["ignored_same_parent"] = ignoredSameParent;
 
                 int stillLight = LightweightCount(asm);
                 if (resolvedAll > 0) result["lightweight_resolved"] = resolvedAll;
-                AddAutoResolved(result);
+                if (compact) { if (_autoResolved.Count > 0) result["resolved_from_lightweight_count"] = _autoResolved.Count; }
+                else AddAutoResolved(result);
                 if (skippedLight.Count > 0)
-                    result["lightweight_not_checked"] = new JArray(skippedLight.Take(50).ToArray());
+                    result["lightweight_not_checked"] = new JArray(skippedLight.Take(compact ? 10 : 50).ToArray());
                 if (targets.Count == 0 && stillLight > 0)
                     result["warning"] = stillLight + " components are lightweight: SolidWorks may leave them out. Pass resolve_lightweight=true for a complete check.";
                 else if (skippedLight.Count > 0)
@@ -239,6 +261,16 @@ namespace SolidworksExecution.Services
         private static JArray Point(double x, double y, double z)
         {
             return new JArray(Math.Round(x, 6), Math.Round(y, 6), Math.Round(z, 6));
+        }
+
+        // True when every path has the same, non-empty parent instance path ("A-1/B-1/x-1" and
+        // "A-1/B-1/y-2" share "A-1/B-1"): components of one sub-assembly.
+        private static bool SameParent(List<string> paths)
+        {
+            if (paths.Count < 2) return false;
+            string Parent(string s) { int i = s.LastIndexOf('/'); return i > 0 ? s.Substring(0, i) : ""; }
+            string first = Parent(paths[0]);
+            return first.Length > 0 && paths.All(x => string.Equals(Parent(x), first, StringComparison.OrdinalIgnoreCase));
         }
 
         // True when `path` is one of `roots` or lies below one.

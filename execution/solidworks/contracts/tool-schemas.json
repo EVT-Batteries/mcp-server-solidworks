@@ -375,7 +375,8 @@
     "include_construction": "boolean (optional, default false — count construction geometry in the totals instead of reporting it apart as construction_length_m)",
     "per_segment": "boolean (optional, default false — also list every segment's {kind, length_m, construction})",
     "include_geometry": "boolean (optional, default false; implies per_segment — each segment also carries start/end [x,y,z], center + radius for arcs, through-points for splines, in meters; part model coordinates, or assembly coordinates (component Transform2 applied) when the active document is an assembly)",
-    "resolve_lightweight": "boolean (optional, default false - in an assembly, resolve every lightweight component first so it is measured instead of skipped)"
+    "resolve_lightweight": "boolean (optional, default false - in an assembly, resolve every lightweight component first so it is measured instead of skipped)",
+    "as_route": "boolean (optional, default false - per sketch and sweep path also return route_points (corner points: intersection of each arc's end tangents, junctions of lines meeting without an arc) and route_bend_radii (one per corner, 0 = sharp), in the include_geometry coordinates: the points / bend_radii create_3d_path takes; route_warning for splines or a broken chain)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string. Part: {document, units:'m', sweeps:[{name, type, suppressed?, profile?, profile_diameter_m?, path, path_length_m, path_segments?, path_edge_count?, path_type?, per_segment?, warning?}], sweep_path_length_m, sketches:[{name, kind:'3d'|'2d', suppressed?, length_m, segments:{<kind>:{count, length_m}}, construction_length_m?, per_segment?}]}. Assembly: {document, units, root:{sweeps, sweep_path_length_m, sketches}, components:[{path, config, instances[], warning?, sweeps, sweep_path_length_m, sketches}], total_sweep_path_length_m (summed over all instances), skipped?:[{name, reason}]}; components with no sweep or reported sketch are omitted."
@@ -821,7 +822,9 @@
     "treat_subassemblies_as_components": "boolean (optional, default false)",
     "include_hidden": "boolean (optional, default false)",
     "resolve_lightweight": "boolean (optional, default false - ResolveAllLightWeightComponents before a whole-assembly check)",
-    "limit": "integer (optional, default 100 - max interferences / violations listed)"
+    "limit": "integer (optional, default 100 - max interferences / violations listed)",
+    "compact": "boolean (optional, default false - counts instead of long lists: not_measured_count + not_measured_neighbours, resolved_from_lightweight_count)",
+    "ignore_same_parent": "boolean (optional, default false - leave out interferences / clearance violations whose components all share one parent sub-assembly; reported as ignored_same_parent)"
    }
   },
   "output": "-> see execution-response.json - CadState.Features holds a single JSON string {assembly, checked, neighbours_checked?, interference_count, interferences:[{components, volume_m3, volume_mm3, box_min?, box_max?, possible_only?}], interferences_truncated_at?, clearance?:{required_m, violation_count, violations:[{a, b, distance_m, distance_mm}], nearest_m?, nearest_pair?, not_measured?}, lightweight_resolved?, resolved_from_lightweight?, lightweight_not_checked?, warning?, clear}."
