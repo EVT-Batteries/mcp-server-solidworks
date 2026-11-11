@@ -245,6 +245,10 @@ namespace SolidworksExecution.Controllers
                 case "check_interference":     return _service.CheckInterference(request);
                 case "import_step":            return _service.ImportStep(request);
                 case "save_body_as_part":      return _service.SaveBodyAsPart(request);
+                case "routing_status":         return _service.RoutingStatus(request);
+                case "add_routing_point":      return _service.AddRoutingPoint(request);
+                case "start_route":            return _service.StartRoute(request);
+                case "route_path":             return _service.RoutePath(request);
                 default:                       return null;
             }
         }

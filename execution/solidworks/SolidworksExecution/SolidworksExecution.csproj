@@ -80,6 +80,11 @@
       <Private>False</Private>
       <EmbedInteropTypes>False</EmbedInteropTypes>
     </Reference>
+    <Reference Include="SolidWorks.Interop.SWRoutingLib">
+      <HintPath>C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\SolidWorks.Interop.SWRoutingLib.dll</HintPath>
+      <Private>False</Private>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Controllers\ToolController.cs" />
@@ -108,6 +113,7 @@
     <Compile Include="Services\SolidWorksService.Lightweight.cs" />
     <Compile Include="Services\SolidWorksService.Interference.cs" />
     <Compile Include="Services\SolidWorksService.Import.cs" />
+    <Compile Include="Services\SolidWorksService.Routing.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>
