@@ -23,6 +23,28 @@ namespace SolidworksExecution.Controllers
             _service = new SolidWorksService(guard);
         }
 
+        // Whether the SLDWORKS window answers messages (Process.Responding), read off the STA thread
+        // so it works while a COM call is stuck. Null when SolidWorks is not running.
+        private static bool? SolidWorksResponding()
+        {
+            try
+            {
+                var procs = System.Diagnostics.Process.GetProcessesByName("SLDWORKS");
+                if (procs.Length == 0) return null;
+                return procs[0].Responding;
+            }
+            catch { return null; }
+        }
+
+        private static string SolidWorksResponsiveNote()
+        {
+            var responding = SolidWorksResponding();
+            if (responding == null) return "SolidWorks is not running.";
+            return responding.Value
+                ? "The SolidWorks window still responds (a long operation or an open dialog)."
+                : "The SolidWorks window is NOT responding (hung or computing).";
+        }
+
         // Read-only resync endpoint: returns the current authoritative state_version
         // WITHOUT a state_version check or increment. The adapter calls this to recover
         // from a desync (e.g. the execution server was restarted after a rebuild).
@@ -52,8 +74,18 @@ namespace SolidworksExecution.Controllers
             };
             try
             {
-                var com = StaExecutor.Instance.Run(() => _service.GetHealthInfo());
+                var com = StaExecutor.Instance.Run(() => _service.GetHealthInfo(), "health",
+                    TimeSpan.FromSeconds(2));
                 foreach (var kv in com) info[kv.Key] = kv.Value;
+            }
+            catch (StaBusyException busy)
+            {
+                // A probe must not queue behind a hung call: report who holds the worker instead.
+                info["busy"] = true;
+                info["busyCall"] = busy.BusyLabel;
+                info["busySinceUtc"] = busy.BusySinceUtc.ToString("o");
+                info["swResponding"] = SolidWorksResponding();
+                info["comError"] = busy.Message;
             }
             catch (Exception ex)
             {
@@ -115,7 +147,25 @@ namespace SolidworksExecution.Controllers
             {
                 // All COM-touching work runs on the single dedicated STA thread (P0.1) — OWIN request
                 // threads are MTA, which made sheet-metal calls return null and add_edge_feature deadlock.
-                response = StaExecutor.Instance.Run(() => Dispatch(request));
+                response = StaExecutor.Instance.Run(() => Dispatch(request),
+                    $"{request.Tool} op={request.OperationId}", StaExecutor.DefaultStartTimeout);
+            }
+            catch (StaBusyException busy)
+            {
+                // Fail fast instead of queuing behind a call SolidWorks never returned from: a queued
+                // request would block its caller and still run (stale) once SolidWorks recovered.
+                string msg = busy.Message + " " + SolidWorksResponsiveNote() +
+                             " This call was NOT run. Wait for that call to finish (or, if SolidWorks is " +
+                             "hung, ask the user to clear it), then check the state before retrying.";
+                ExecLog.Write($"<- {request.Tool} FAILED SOLIDWORKS_BUSY: {msg}");
+                return Request.CreateResponse(HttpStatusCode.OK, new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "FAILED",
+                    Verified = false,
+                    StateVersion = _guard.GetCurrentStateVersion(),
+                    Error = new ExecutionError { Code = "SOLIDWORKS_BUSY", Message = msg }
+                });
             }
             catch (System.Exception ex)
             {

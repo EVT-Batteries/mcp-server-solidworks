@@ -21,6 +21,15 @@ description: >-
   `Controllers/ToolController.cs` dispatches on the tool name to `SolidWorksService` methods, a
   partial class split by family under `Services/`. All COM work runs on one STA thread. The adapter
   starts `bin/Debug/SolidworksExecution.exe` on demand (`ensure_ready`, or the next tool call).
+  The STA worker takes one call at a time (`Infrastructure/StaExecutor.cs`): a call waits at most
+  20 s for it, then fails with `SOLIDWORKS_BUSY` naming the call that holds it and whether the
+  SolidWorks window responds; it is not queued and never runs later. `/health` answers `busy`
+  within 2 s instead of blocking. This happens when SolidWorks hangs inside a COM call (a
+  `Save3` that never returned, 2026-11-11): the adapter's TIMEOUT only ends the HTTP wait, while
+  the call keeps running in SolidWorks. Don't retry while busy; check `/health`, and if
+  `swResponding` stays false ask the user to clear or restart SolidWorks. SolidWorks writes a
+  hang dump under `%LOCALAPPDATA%\SOLIDWORKS\CXPD\<session>\` and shows its own "reported an
+  issue" prompt.
 - **Contract** `execution/solidworks/contracts/tool-schemas.json`: one entry per tool;
   `adapters/claude/tests/test_schema_contract.py` fails on any drift between it and `server.py`.
 - **state_version**: every request carries it and must match the server's (`GET /api/tool/state`).
