@@ -116,6 +116,21 @@ namespace SolidworksExecution.Services
                 double expectedLength = -1.0;
                 bool prevAddToDb = sm.AddToDB;
                 sm.AddToDB = true;   // exact coordinates: no inference snapping, no automatic relations
+                // AddToDB alone did not stop Create3PointArc from snapping an arc end onto a nearby
+                // point of the same sketch: in a zoomed-out view of a long route, points a few mm
+                // apart fall within the screen-space inference tolerance (a loop crossing over itself,
+                // two short legs). Switch inference, automatic relations and point snaps off for the
+                // draw and restore the user's settings afterwards.
+                var swApp = _solidWorks;
+                int[] toggles = { 249 /* swSketchInference */, 9 /* swSketchAutomaticRelations */,
+                                  266 /* swSketchSnapsPoints */, 271 /* swSketchSnapsNearest */,
+                                  270 /* swSketchSnapsIntersections */ };
+                var prevToggles = new bool[toggles.Length];
+                for (int ti = 0; ti < toggles.Length; ti++)
+                {
+                    prevToggles[ti] = swApp.GetUserPreferenceToggle(toggles[ti]);
+                    swApp.SetUserPreferenceToggle(toggles[ti], false);
+                }
                 try
                 {
                     if (redraw)
@@ -160,6 +175,8 @@ namespace SolidworksExecution.Services
                 finally
                 {
                     sm.AddToDB = prevAddToDb;
+                    for (int ti = 0; ti < toggles.Length; ti++)
+                        swApp.SetUserPreferenceToggle(toggles[ti], prevToggles[ti]);
                 }
 
                 string name = (active as IFeature)?.Name;
