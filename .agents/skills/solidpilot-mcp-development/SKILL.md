@@ -255,6 +255,12 @@ Results are in `$r.cadState.features` (often one JSON string).
   configurations. Deleting features does not shrink the file on a plain save, and a second
   configuration adds to it. `set_component_state` reports mates per changed component after the
   change: over 15 min for 16 instances in a 1,112-component assembly, hence `include_mates=False`.
+- **Measure and multi-body components (2026-11-12)**: `IMeasure` on two selected components
+  sizes only part of a multi-body component (a Routing tube has one body per segment: 151.5 mm
+  reported for a 0.04 mm gap). Measure body to body (`GetBodies3` + `IBody2.Select2`) and keep
+  the minimum. A modal dialog from another add-in (SOLIDWORKS CAM on saving an assembly with
+  lightweight components) blocks a call with 0 % CPU and `swResponding` true: ask the user to
+  look at the SolidWorks window.
 - **Saving (2026-11-12)**: `IModelDoc2.Save3` of an assembly does not write its modified
   references (route sub-assemblies, connector parts after a routing import, components rebuilt
   or resolved by checks); on an unmodified document it still rewrites the file. `save_document`
