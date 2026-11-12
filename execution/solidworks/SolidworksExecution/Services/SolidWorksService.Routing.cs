@@ -584,6 +584,23 @@ namespace SolidworksExecution.Services
 
         // Segments of the active (route) 3D sketch: each line / arc with its end points, total
         // length, and the open ends (end points used by one segment only).
+        /// <summary>Current [x, y, z] (m, sketch = route coordinates) of every non-construction
+        /// line / arc end of the sketch.</summary>
+        private static List<double[]> SketchPointsOf(ISketch sk)
+        {
+            var list = new List<double[]>();
+            void Add(ISketchPoint sp) { if (sp != null) list.Add(new[] { sp.X, sp.Y, sp.Z }); }
+            if (!(sk?.GetSketchSegments() is object[] segs)) return list;
+            foreach (var o in segs)
+            {
+                var seg = o as ISketchSegment;
+                if (seg == null || seg.ConstructionGeometry) continue;
+                if (seg is ISketchLine ln) { Add(ln.GetStartPoint2() as ISketchPoint); Add(ln.GetEndPoint2() as ISketchPoint); }
+                else if (seg is ISketchArc arc) { Add(arc.GetStartPoint2() as ISketchPoint); Add(arc.GetEndPoint2() as ISketchPoint); }
+            }
+            return list;
+        }
+
         private static JObject RouteSketchGeometry(ISketch sk)
         {
             var o = new JObject();
@@ -715,6 +732,8 @@ namespace SolidworksExecution.Services
                 steps.Add("active sketch: " + (sk != null ? ((sk as IFeature)?.Name ?? "(route sketch)") : "none"));
 
                 double expected = -1;
+                double snapTol = p?.Value<double?>("snap_tolerance") ?? 0.0005;
+                double mergeTol = p?.Value<double?>("merge_tolerance") ?? 1e-5;
                 if (!string.IsNullOrWhiteSpace(pointsJson) && pointsJson.Trim() != "[]")
                 {
                     if (sk == null)
@@ -724,6 +743,33 @@ namespace SolidworksExecution.Services
                     string perr = ParsePoints3D(pointsJson, out pts);
                     if (perr != null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", perr);
+                    // The route sketch is under-constrained: adding stubs or bundles lets the solver
+                    // move earlier geometry by a few um, so a bundle drawn to the coordinates an
+                    // earlier call returned no longer meets it (found 2026-11-12: a 7 um gap at a
+                    // breakout). Snap both ends to the nearest existing sketch point as it is NOW.
+                    if (snapTol > 0)
+                    {
+                        var existing = SketchPointsOf(sk);
+                        foreach (int end in new[] { 0, pts.Count - 1 })
+                        {
+                            double best = double.MaxValue; double[] bp = null;
+                            foreach (var q in existing)
+                            {
+                                double dx = q[0] - pts[end][0], dy = q[1] - pts[end][1], dz = q[2] - pts[end][2];
+                                double d = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                                if (d < best) { best = d; bp = q; }
+                            }
+                            string which = end == 0 ? "start" : "end";
+                            if (bp != null && best <= snapTol)
+                            {
+                                if (best > 1e-9) steps.Add($"{which} snapped {Math.Round(best * 1e6, 1)} um onto an existing route point");
+                                else steps.Add($"{which} on an existing route point");
+                                pts[end] = new[] { bp[0], bp[1], bp[2] };
+                            }
+                            else
+                                steps.Add($"{which} is a new route point (nearest existing {(bp == null ? "none" : Math.Round(best * 1000, 3) + " mm")})");
+                        }
+                    }
                     var radii = new double[Math.Max(0, pts.Count - 2)];
                     for (int i = 0; i < radii.Length; i++) radii[i] = bendRadius;
                     string radiiJson = p?.Value<string>("bend_radii");
@@ -744,7 +790,6 @@ namespace SolidworksExecution.Services
                     try
                     {
                         expected = DrawFilletedPolyline(sm, pts, radii, warnings);
-                        try { sk.MergePoints(1e-6); } catch (Exception ex) { warnings.Add("MergePoints: " + ex.Message); }
                     }
                     finally
                     {
@@ -752,6 +797,13 @@ namespace SolidworksExecution.Services
                         for (int ti = 0; ti < toggles.Length; ti++) _solidWorks.SetUserPreferenceToggle(toggles[ti], prev[ti]);
                     }
                     steps.Add($"drew {pts.Count} points");
+                }
+                // Merge coincident points (consecutive segments, bundle ends at breakouts, stub ends),
+                // also on a call without points: route_path(points='[]') repairs a gap.
+                if (sk != null && mergeTol > 0)
+                {
+                    try { steps.Add($"MergePoints({mergeTol}): " + sk.MergePoints(mergeTol)); }
+                    catch (Exception ex) { warnings.Add("MergePoints: " + ex.Message); }
                 }
 
                 var result = new JObject { ["route"] = ComponentPath(routeComp) };
@@ -880,13 +932,28 @@ namespace SolidworksExecution.Services
                         void Note(string v, string name) { if (string.IsNullOrWhiteSpace(v)) filled.Add(name); }
                         Note(hw, "wire"); Note(hfr, "from ref"); Note(hfp, "pin"); Note(hfpn, "partno"); Note(htr, "to ref");
                         Note(htp, "pin"); Note(htpn, "partno"); Note(hcab, "cable"); Note(hcore, "core"); Note(hcol, "color");
-                        Note(hspec, "spec"); Note(hoth, "other");
+                        // "other" is not required by the API import and SetFromToListHeaderDefinitions
+                        // does not keep it (it reads back empty, 2026-11-12): don't count it.
+                        Note(hspec, "spec");
                         if (filled.Count > 0)
                         {
                             bool set = rs.SetFromToListHeaderDefinitions(Fill(hw, "wire"), Fill(hfr, "from ref"), Fill(hfp, "pin"),
                                 Fill(hfpn, "partno"), Fill(htr, "to ref"), Fill(htp, "pin"), Fill(htpn, "partno"), Fill(hcab, "cable"),
                                 Fill(hcore, "core"), Fill(hcol, "color"), Fill(hspec, "spec"), Fill(hoth, "other"));
-                            steps.Add($"filled empty from-to header definitions ({string.Join(", ", filled)}): {set}");
+                            // Read back: report what is still empty instead of trusting the call.
+                            var still = new JArray();
+                            if (rs.GetFromToListHeaderDefinitions(out hw, out hfr, out hfp, out hfpn, out htr, out htp, out htpn,
+                                    out hcab, out hcore, out hcol, out hspec, out hoth))
+                            {
+                                void Still(string v, string name) { if (string.IsNullOrWhiteSpace(v)) still.Add(name); }
+                                Still(hw, "wire"); Still(hfr, "from ref"); Still(hfp, "pin"); Still(hfpn, "partno"); Still(htr, "to ref");
+                                Still(htp, "pin"); Still(htpn, "partno"); Still(hcab, "cable"); Still(hcore, "core"); Still(hcol, "color");
+                                Still(hspec, "spec");
+                            }
+                            steps.Add($"filled empty from-to header definitions ({string.Join(", ", filled)}): {set}"
+                                + (still.Count > 0 ? $"; still empty: {string.Join(", ", still)}" : ""));
+                            if (still.Count > 0)
+                                warnings.Add("from-to header definitions still empty (the import will fail): " + string.Join(", ", still));
                         }
                     }
                 }

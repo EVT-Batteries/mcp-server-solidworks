@@ -895,7 +895,7 @@
   "output": "-> see execution-response.json - Features[0] = JSON {imported, new_route?, route?:{component, wires, cables_count, segments}, route_assemblies, steps, warnings?}"
  },
  "route_path": {
-  "description": "Active assembly: edits a route (Route feature + IRouteManager.EditRoute, unless one is being edited), adds connection points (AddToRoute), draws a filleted 3D polyline in the route sketch (AddToDB, MergePoints), optionally ExitRoute + EditAssembly + RouteWires. Increments state_version.",
+  "description": "Active assembly: edits a route (Route feature + IRouteManager.EditRoute, unless one is being edited), adds connection points (AddToRoute), snaps the first / last point onto the nearest existing route sketch point within snap_tolerance, draws a filleted 3D polyline in the route sketch (AddToDB), merges points within merge_tolerance (MergePoints, also without points), optionally ExitRoute + EditAssembly + RouteWires. Increments state_version.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -906,7 +906,9 @@
     "bend_radii": "string (optional - JSON list, one radius per corner)",
     "add_cpoints": "string (optional - JSON [[component, cpoint],...])",
     "exit_route": "boolean (optional, default true)",
-    "route_wires": "boolean (optional, default true - after exit)"
+    "route_wires": "boolean (optional, default true - after exit)",
+    "snap_tolerance": "number (optional, meters, default 0.0005 - 0 = no snapping)",
+    "merge_tolerance": "number (optional, meters, default 1e-5 - 0 = no merge)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?}"

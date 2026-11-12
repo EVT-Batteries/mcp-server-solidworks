@@ -225,9 +225,20 @@ Results are in `$r.cadState.features` (often one JSON string).
   - `InsertConnectionPoint` needs the exit face (mark 1) and a sketch point (mark 1);
     `InsertRoutePoint` with only a sketch point selected creates nothing (opens its dialog).
   - `IWire.GetRouteErrors` reports `violates_bend_radius` against the wire library's
-    `MinBendRadius`.
+    `MinBendRadius`, for the innermost wire of the bundle: an arc of exactly the minimum radius
+    is flagged (2026-11-12). Sharp corners where bundles meet at a breakout or a stub end are not.
+  - First real harnesses (2026-11-12): `ImportFromToList` also returns false when row 1 of the
+    list holds text or a Pin cell is empty (an empty Partno is fine, but that connector gets no
+    stub: `AddToRoute` its CPoint). `SetFromToListHeaderDefinitions` never keeps "other" and the
+    import does not need it. The route sketch is under-constrained: `AddToRoute` / new geometry
+    lets the solver move earlier points by a few um, so `route_path` snaps its end points onto the
+    current sketch points and merges at 10 um. The import writes `Harness_<n>-<asm>.SLDASM` plus
+    its fromToList / segmentList XML next to the assembly at once; a failed import still uses
+    up a number, and a deleted route leaves its files behind (delete them).
 
 ## Committing
 
-Commit to the fork only when the user asks. Include the source, contract, adapter, README and the
-rebuilt `bin/Debug` files; end the message with the session's attribution lines.
+Commit to the fork only when the user asks. When a change is finished, give the user a
+ready-to-paste commit message instead (subject line, body of what changed and why, the files to
+commit). The commit includes the source, contract, adapter, README and the rebuilt `bin/Debug`
+files; end the message with the session's attribution lines.

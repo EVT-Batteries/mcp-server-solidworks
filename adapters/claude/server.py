@@ -1440,8 +1440,14 @@ def import_from_to(
     references: JSON {component instance: reference designator}, set before the import
         (IComponent2.ComponentReference), e.g. '{"P1_DTM06-6S-1": "P1"}': the list's From/To Ref
         are matched to these. Each connector needs a connection point (add_routing_point).
-    Empty from-to header definitions are filled first (cable, core, other, ...): the import
-    refuses to run while one is empty. The PropertyManager pages the import opens are accepted
+        Only resolved components count: for a harness used in several configurations, import
+        once per configuration (activate it, the other instances suppressed) and suppress each
+        route in the other configurations.
+    The import returns False (imported=false, no reason given) when row 1 of the list holds any
+    text or a Pin is empty. A connector whose Partno is empty is wired but gets NO stub: add it
+    with route_path(add_cpoints=...).
+    Empty from-to header definitions are filled first (cable, core, ...): the import refuses to
+    run while one is empty ('other' does not matter). The PropertyManager pages the import opens are accepted
     with up to press_ok RunCommand(PmOK). The import makes a NEW route sub-assembly
     (Harness_<n>) with one stub per connector and a guideline per connector pair; it is returned
     as new_route. convert_guidelines=True turns the guidelines into (straight / auto) route
@@ -1466,9 +1472,12 @@ def route_path(
     add_cpoints: str = "[]",
     exit_route: bool = True,
     route_wires: bool = True,
+    snap_tolerance: Annotated[float, Field(ge=0)] = 0.0005,
+    merge_tolerance: Annotated[float, Field(ge=0)] = 1e-5,
 ) -> str:
     """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one call per
-    bundle). Bumps state_version.
+    bundle). Bumps state_version. To redraw a bundle, delete the route
+    (edit_feature(action='delete') on its component) and import again.
     route: the route sub-assembly (routing_status route_assemblies / import_from_to new_route);
         ignored while a route is already being edited.
     points: JSON [[x,y,z], ...] in METERS, top-assembly coordinates (the route sub-assembly sits
@@ -1480,12 +1489,20 @@ def route_path(
         (each gets its stub), e.g. '[["P2-1", "CPoint1"]]'.
     exit_route=False keeps the route open for the next bundle; the last call exits (True), and
         with route_wires routes the wires and returns them with cut lengths and errors
-        (violates_bend_radius = a bend under the wire's library minimum bend radius).
+        (violates_bend_radius: SOLIDWORKS checks the innermost wire of the bundle, so a bend at
+        exactly the library minimum is flagged; use minimum + bundle radius or more. Sharp
+        corners at a breakout or at a stub end are not flagged).
+    snap_tolerance (m): the first / last point is moved onto the nearest existing route point
+        within this distance (the solver shifts earlier geometry by a few um when stubs or
+        bundles are added, which would leave a gap at a breakout). 0 = off.
+    merge_tolerance (m): coincident points are merged within this distance on every call; a
+        call with points='[]' merges an existing gap.
     Returns the route sketch (segments, total length_mm, open_ends), drawn_length_mm, and after
-    exit the wires and segments."""
+    exit the wires and segments; steps say whether each end snapped onto the route."""
     return _call("route_path", {
         "route": route, "points": points, "bend_radius": bend_radius, "bend_radii": bend_radii,
-        "add_cpoints": add_cpoints, "exit_route": exit_route, "route_wires": route_wires})
+        "add_cpoints": add_cpoints, "exit_route": exit_route, "route_wires": route_wires,
+        "snap_tolerance": snap_tolerance, "merge_tolerance": merge_tolerance})
 
 
 @mcp.tool(structured_output=False)
