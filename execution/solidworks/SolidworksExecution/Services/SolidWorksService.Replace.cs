@@ -300,5 +300,141 @@ namespace SolidworksExecution.Services
                 return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INTERNAL_ERROR", ex.Message);
             }
         }
+
+        // edit_bodies: act on bodies of the ACTIVE part, chosen by the indices / names that
+        // analyze_model(bodies) reports (solids: visible solid bodies in GetBodies2 order; surfaces:
+        // all surface bodies). delete / keep add one Delete/Keep Body feature (it can be suppressed
+        // per configuration like any feature); hide / show set body visibility.
+        public ExecutionResponse EditBodies(ToolRequest request)
+        {
+            if (_guard.IsDuplicate(request.OperationId))
+                return _guard.GetDuplicate(request.OperationId);
+            if (!_guard.IsStateVersionValid(request.StateVersion))
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
+            if (!EnsureConnected())
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            try
+            {
+                var p = request.Params as JObject;
+                string action = (p?.Value<string>("action") ?? "").ToLowerInvariant();
+                string type = (p?.Value<string>("body_type") ?? "solid").ToLowerInvariant();
+                bool all = p?.Value<bool?>("all") ?? false;
+                string featName = p?.Value<string>("feature_name") ?? "";
+                var indices = (p?["indices"] as JArray)?.Select(t => (int)t).ToList() ?? new List<int>();
+                var names = (p?["names"] as JArray)?.Select(t => (string)t).ToList() ?? new List<string>();
+
+                if (action != "delete" && action != "keep" && action != "hide" && action != "show")
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "MISSING_PARAMETER", "action must be 'delete', 'keep', 'hide' or 'show'.");
+                if (type != "solid" && type != "surface")
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "INVALID_PARAMETER", "body_type must be 'solid' or 'surface'.");
+                if (!all && indices.Count == 0 && names.Count == 0)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "MISSING_PARAMETER", "Give indices, names or all=true.");
+
+                var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
+                var part = doc as IPartDoc;
+                if (part == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "WRONG_DOCUMENT_TYPE", "edit_bodies requires an active part.");
+
+                // Same enumeration as analyze_model(bodies).
+                bool isSolid = type == "solid";
+                var list = ((part.GetBodies2(isSolid ? 0 : 1, isSolid) as object[]) ?? new object[0])
+                    .OfType<IBody2>().ToList();
+                var chosen = new List<IBody2>();
+                var missing = new JArray();
+                if (all) chosen.AddRange(list);
+                foreach (int i in indices)
+                {
+                    if (i >= 0 && i < list.Count) { if (!chosen.Contains(list[i])) chosen.Add(list[i]); }
+                    else missing.Add(i);
+                }
+                foreach (string n in names)
+                {
+                    var b = list.FirstOrDefault(x => { try { return string.Equals(x.Name, n, StringComparison.OrdinalIgnoreCase); } catch { return false; } });
+                    if (b != null) { if (!chosen.Contains(b)) chosen.Add(b); }
+                    else missing.Add(n);
+                }
+                if (missing.Count > 0)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "BODY_NOT_FOUND", $"Not found among the {list.Count} {type} bodies: {missing.ToString(Newtonsoft.Json.Formatting.None)}. "
+                        + "Read indices and names with analyze_model(analysis_type='bodies'); nothing was changed.");
+
+                var result = new JObject { ["action"] = action, ["body_type"] = type, ["bodies"] = chosen.Count };
+                if (action == "hide" || action == "show")
+                {
+                    foreach (var b in chosen) b.HideBody(action == "hide");
+                    doc.GraphicsRedraw2();
+                }
+                else
+                {
+                    doc.ClearSelection2(true);
+                    var selMgr = doc.SelectionManager as ISelectionMgr;
+                    int selected = 0;
+                    foreach (var b in chosen)
+                    {
+                        var sd = selMgr?.CreateSelectData() as SelectData;
+                        if (b.Select2(true, sd)) selected++;
+                    }
+                    if (selected != chosen.Count)
+                    {
+                        doc.ClearSelection2(true);
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "SELECTION_FAILED", $"Selected {selected} of {chosen.Count} bodies; nothing was changed.");
+                    }
+                    var feat = doc.FeatureManager.InsertDeleteBody2(action == "keep") as IFeature;
+                    doc.ClearSelection2(true);
+                    if (feat == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "FEATURE_FAILED", "InsertDeleteBody2 returned no feature.");
+                    if (!string.IsNullOrEmpty(featName)) { try { feat.Name = featName; } catch { } }
+                    try { doc.ForceRebuild3(false); } catch { }
+                    result["feature"] = feat.Name;
+                }
+                result["solid_bodies_visible"] = (part.GetBodies2(0, true) as object[])?.Length ?? 0;
+                result["solid_bodies"] = (part.GetBodies2(0, false) as object[])?.Length ?? 0;
+                result["surface_bodies"] = (part.GetBodies2(1, false) as object[])?.Length ?? 0;
+                result["surface_bodies_visible"] = (part.GetBodies2(1, true) as object[])?.Length ?? 0;
+                try
+                {
+                    var cfg = doc.ConfigurationManager?.ActiveConfiguration;
+                    if (cfg != null) result["configuration"] = cfg.Name;
+                }
+                catch { }
+                result["note"] = "Not saved (save_document).";
+
+                var response = new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "COMPLETED",
+                    Verified = true,
+                    StateVersion = _guard.GetCurrentStateVersion() + 1,
+                    CadState = new CadState
+                    {
+                        StateVersion = _guard.GetCurrentStateVersion() + 1,
+                        ActiveDocument = doc.GetTitle(),
+                        DocumentType = "PART",
+                        ActiveSketch = null,
+                        Features = new List<string> { result.ToString(Newtonsoft.Json.Formatting.None) },
+                        Dimensions = new List<string>()
+                    },
+                    Error = null
+                };
+                _guard.RegisterCompleted(request.OperationId, response);
+                return response;
+            }
+            catch (COMException ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INTERNAL_ERROR", ex.Message);
+            }
+        }
     }
 }

@@ -95,7 +95,7 @@ LONG_TOOLS = {
     "set_component_state", "import_step", "measure_curves", "manage_configurations",
     "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
     "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
-    "replace_component", "insert_part",
+    "replace_component", "insert_part", "edit_bodies",
 }
 
 
@@ -442,6 +442,7 @@ def set_component_state(
     suppression: str = "",
     visible: bool | None = None,
     referenced_configuration: str = "",
+    include_mates: bool = True,
 ) -> str:
     """Suppresses, resolves (unsuppresses) or makes lightweight components of the active assembly,
     shows or hides them, and / or sets which configuration of their file they use
@@ -455,8 +456,12 @@ def set_component_state(
     Changing a nested component edits its sub-assembly's active configuration, so that
     sub-assembly file is modified too: work on local copies only. Rebuilds, then returns per
     component the change result (ok / failed / bad_state) and its status after the rebuild with its
-    mates and their errors (as component_status). Run check_rebuild before saving."""
-    params: dict = {"components": components, "suppression": suppression}
+    mates and their errors (as component_status). Run check_rebuild before saving.
+    include_mates=False leaves the mates out of that report: on an assembly of ~1000 components
+    the mate scan takes minutes per component (e.g. switching many instances to another
+    configuration)."""
+    params: dict = {"components": components, "suppression": suppression,
+                    "include_mates": include_mates}
     if visible is not None:
         params["visible"] = visible
     if referenced_configuration:
@@ -578,6 +583,38 @@ def insert_part(
     return _call("insert_part", {
         "file_path": file_path, "solids": solids, "surfaces": surfaces, "break_link": break_link,
         "hide_surface_bodies": hide_surface_bodies, "configuration": configuration})
+
+
+# ---------------------------------------------------------------------------
+# Tool: edit_bodies
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def edit_bodies(
+    action: Literal["delete", "keep", "hide", "show"],
+    body_type: Literal["solid", "surface"] = "solid",
+    indices: list[int] | None = None,
+    names: list[str] | None = None,
+    all: bool = False,
+    feature_name: str = "",
+) -> str:
+    """Delete, keep, hide or show bodies of the ACTIVE PART (local copies only). Bumps
+    state_version; does NOT save.
+    Choose bodies by the indices or names analyze_model(analysis_type='bodies') reports (solid:
+    visible solid bodies; surface: all surface bodies, its surface_bodies list), or all=True.
+    Re-read the indices after any change: deleting or hiding a solid renumbers the list.
+    action='delete' / 'keep': one Delete/Keep Body feature removes the chosen bodies (or all
+        others), named feature_name if given. Like any feature it can be suppressed in one
+        configuration (edit_feature) to bring the bodies back there, e.g. a light display
+        configuration of a heavy supplier model.
+    action='hide' / 'show': body visibility only (hidden bodies keep their mates and geometry).
+    A body not found fails the call with nothing changed.
+    Returns body counts (all and visible) after the change and the active configuration."""
+    params: dict = {"action": action, "body_type": body_type, "all": all, "feature_name": feature_name}
+    if indices:
+        params["indices"] = indices
+    if names:
+        params["names"] = names
+    return _call("edit_bodies", params)
 
 
 # ---------------------------------------------------------------------------

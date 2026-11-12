@@ -246,6 +246,15 @@ Results are in `$r.cadState.features` (often one JSON string).
   A replaced instance is renamed after the new file (and may be renumbered). Per-component COM
   loops over a 1000-component assembly (mates of every match, or faces of a 9000-face part) run
   for many minutes: name components, and stop the execution server to abort a read-only call.
+  An "exterior components" save keeps every face of each visible component (9,418 faces against
+  ~840 for the "exterior faces" skin of the same model: the view lags), and FeatureWorks offers
+  feature recognition when the user opens it (answer No). Its bodies are one `BaseBody` feature
+  each, so internal bodies can be deleted or suppressed one by one (`analyze_model('bodies')` now
+  gives each body's box and lists the sheet bodies, which show which components are visible).
+  Suppression is per configuration, but body visibility (`IBody2.HideBody`) is shared by all
+  configurations. Deleting features does not shrink the file on a plain save, and a second
+  configuration adds to it. `set_component_state` reports mates per changed component after the
+  change: over 15 min for 16 instances in a 1,112-component assembly, hence `include_mates=False`.
 - **Saving (2026-11-12)**: `IModelDoc2.Save3` of an assembly does not write its modified
   references (route sub-assemblies, connector parts after a routing import, components rebuilt
   or resolved by checks); on an unmodified document it still rewrites the file. `save_document`

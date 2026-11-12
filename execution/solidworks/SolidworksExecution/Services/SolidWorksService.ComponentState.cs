@@ -148,6 +148,9 @@ namespace SolidworksExecution.Services
                 bool? visible = p?["visible"] == null || p["visible"].Type == JTokenType.Null
                     ? (bool?)null : p.Value<bool>("visible");
                 string refConfig = p?.Value<string>("referenced_configuration") ?? "";
+                // The mate report after the change scans every mate per component: minutes on a
+                // large assembly. include_mates=false skips it.
+                bool includeMatesAfter = p?.Value<bool?>("include_mates") ?? true;
 
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = modelDoc as IAssemblyDoc;
@@ -236,7 +239,7 @@ namespace SolidworksExecution.Services
 
                 // State after the rebuild, mates included: a resolved component shows its broken mates.
                 var after = new JArray();
-                foreach (var c in comps) after.Add(ComponentStatusJson(c, true));
+                foreach (var c in comps) after.Add(ComponentStatusJson(c, includeMatesAfter));
 
                 var result = new JObject
                 {

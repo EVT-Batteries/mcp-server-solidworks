@@ -226,6 +226,7 @@ namespace SolidworksExecution.Controllers
                 case "place_component":        return _service.PlaceComponent(request);
                 case "replace_component":      return _service.ReplaceComponent(request);
                 case "insert_part":            return _service.InsertPart(request);
+                case "edit_bodies":            return _service.EditBodies(request);
                 case "check_rebuild":          return _service.CheckRebuild(request);
                 case "component_status":       return _service.ComponentStatus(request);
                 case "set_component_state":    return _service.SetComponentState(request);

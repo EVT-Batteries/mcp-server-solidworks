@@ -452,10 +452,11 @@
     "components": "string or array (required — JSON list of component names or instance paths)",
     "suppression": "string (optional — suppressed | resolved | lightweight | fully_resolved; 'unsuppress' = resolved)",
     "visible": "boolean (optional — true shows, false hides)",
-    "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration)"
+    "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration)",
+    "include_mates": "boolean (optional, default true — false leaves mates out of the status after the change; the mate scan is slow on large assemblies)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included], all_ok, note}."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included unless include_mates=false], all_ok, note}."
  },
  "manage_configurations": {
   "description": "Lists, adds (IModelDoc2.AddConfiguration3, swConfigOption_DontActivate when activate=false), activates (ShowConfiguration2), renames (IConfiguration.Name), deletes (DeleteConfiguration2) or sets properties (Description, SuppressNewComponentModels) of the configurations of the active document. 'list' does NOT increment state_version; the other actions do. Never saves.",
@@ -516,6 +517,22 @@
    }
   },
   "output": "→ see execution-response.json — Features[0] = JSON {feature, feature_type, source, link_broken, solid_bodies_before/after, surface_bodies_before/after, surface_bodies_hidden, box_m, note}"
+ },
+ "edit_bodies": {
+  "description": "Active part: acts on bodies chosen by the indices / names analyze_model(bodies) reports (solid: visible solid bodies, GetBodies2 order; surface: all surface bodies). delete / keep select them (IBody2.Select2) and add one Delete/Keep Body feature (IFeatureManager.InsertDeleteBody2), optionally renamed; hide / show set IBody2.HideBody. Fails without changes when a body is not found. Does not save. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "action": "string (required — delete | keep | hide | show)",
+    "body_type": "string (optional, default 'solid' — solid | surface)",
+    "indices": "integer[] (optional — body indices from analyze_model(bodies))",
+    "names": "string[] (optional — body names)",
+    "all": "boolean (optional, default false — every body of body_type)",
+    "feature_name": "string (optional — name for the Delete/Keep Body feature)"
+   }
+  },
+  "output": "→ see execution-response.json — Features[0] = JSON {action, body_type, bodies, feature?, solid_bodies, solid_bodies_visible, surface_bodies, surface_bodies_visible, configuration, note}"
  },
  "screenshot": {
   "description": "Saves the active document's graphics view as a PNG (IModelDoc2.SaveBMP to a temporary BMP, converted with System.Drawing); the document file is never written. Optionally switches to a standard view orientation (IModelDoc2.ShowNamedView2 with swStandardViews_e) and zooms to fit first, and draws an optional caption band under the image. Changes only the on-screen view; does NOT increment state_version.",
