@@ -104,7 +104,7 @@ The `adapters/` layer is provider-specific and replaceable. Because the executio
 
 ## Tool List
 
-The system currently exposes **64 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
+The system currently exposes **66 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
 
 The **resources** carry the rule set and the contracts, not behaviour: `recipe://usage/index` plus one static `recipe://usage/<section>` per rule section, and `schema://feature-graph` + `schema://analysis-artifact`. The split is deliberate — a tool's description is paid on every single turn whether or not it is used, while a resource body costs only when read, so near-static reference material belongs on the resource side.
 
@@ -114,7 +114,7 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `open_document` — opens an existing file from disk (native `.sldprt`/`.sldasm`/`.slddrw`; imports `.ipt`/`.CATPart`/STEP/IGES via 3D Interconnect when the translator is available, otherwise returns a clear `OPEN_FAILED`); `lightweight` opens an assembly's components lightweight or fully resolved.
 - `import_step` — imports a STEP / IGES / Parasolid file, saves it as a `.SLDPRT` and leaves that part open (not the import document), with its bodies and bounding box.
 - `activate_document` — switches between open documents.
-- `save_document` — saves the part or drawing to disk.
+- `save_document` — saves the part or drawing to disk; with `assembly_as_part`, saves a copy of the active assembly as one part (exterior components / all components as solids, or exterior faces as surfaces).
 - `close_document` — closes the document.
 
 ### Sketch
@@ -157,6 +157,8 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `open_new_assembly` — opens a new blank assembly document.
 - `insert_component` — inserts a part or sub-assembly file as a component: insertion point or a full 13-number transform, fixed or floating.
 - `place_component` — sets an existing component's transform and/or fixed state (e.g. fix parts modelled in assembly coordinates at the origin).
+- `replace_component` — replaces the file of a component (and its other instances) with another part or assembly, keeping the transforms (mates re-attach only to matching geometry).
+- `insert_part` — inserts another part's solid (and / or surface) bodies into the active part, e.g. solid bodies into a surface-only supplier model whose surfaces carry the assembly's mates.
 - `add_mate` — adds a mate (coincident, concentric, parallel, perpendicular, tangent, distance, angle, lock) using robust **index-based** entity selection; a mate SolidWorks rejects (over-defined, or new rebuild errors) is deleted and the call fails with the reason.
 - `analyze_assembly` — reads components (tree order with full transforms, incl. a flattened leaf view across nesting levels), mates (creation order, locale-proof enum types, entity anchors), or one component's face/edge lists.
 - `save_body_as_part` — extracts one body of a multibody part into its own part file (for flattened assembly STEP imports).

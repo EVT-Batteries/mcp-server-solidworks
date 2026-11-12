@@ -342,13 +342,14 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "file_path": "string (optional — full output path incl. extension: .sldprt/.sldasm/.slddrw; in-place save if omitted)"
+    "file_path": "string (optional — full output path incl. extension: .sldprt/.sldasm/.slddrw; in-place save if omitted)",
+    "assembly_as_part": "string (optional — '', 'all_components', 'exterior_components' or 'exterior_faces': active assembly saved as a COPY to a .sldprt file_path with that geometry (user preference swSaveAssemblyAsPartOptions); Features[0] = JSON {saved_part, assembly_as_part, size_bytes})"
    }
   },
   "output": "→ see execution-response.json"
  },
  "analyze_model": {
-  "description": "Analyzes the active part document without modifying it. Does NOT increment state_version. analysis_type='mass_properties': returns volume, surface_area, center of gravity (cx/cy/cz). analysis_type='geometry': returns bodies, faces, edges, vertices counts. analysis_type='edges': returns one JSON object listing every solid edge with start/end/midpoint 3D coords (meters, rounded to 6 decimals; closed/circular edges also include length) — pick an edge index (the `i` field) for add_edge_feature edge_indices, or a midpoint for coordinate selection. Slowest mode on very large parts (COM-bound). analysis_type='faces': returns one JSON object listing every solid face with a stable index `i` (planar faces also carry normal, area, and a representative on-plane point) — pick a face index for create_sketch(on_face, face_index). analysis_type='features': the COMPACT part recipe (default 'understand the part' read) — ordered feature tree (name/type, suppressed only when true), deduped driving dimensions (SI, rounded to 6 decimals), a per-sketch SUMMARY (segment counts + an inline {cx,cy,r} for single-full-circle profiles; NO per-segment coordinate dump), each sketch's plane {ref:'Front/Top/Right Plane', offset}, each extrude/cut's {end, depth (blind only), reversed}, pattern semantics, and equations + globals; features are in tree (history) order. analysis_type='sketch' (requires 'name'): ONE sketch's full geometry (every segment, rounded to 6 decimals) + plane — use only when exact sketch coordinates are needed. analysis_type='feature_map': per-feature geometry ATTRIBUTION — walks the tree base→end with the ROLLBACK BAR (swMoveRollbackBarTo_e) and diffs the topology between stops inside the tool; consumed_edges (both endpoints gone — trimmed neighbours excluded) are the deterministic fillet/chamfer edge anchors (PRE-feature geometry), created_faces are genuinely new surfaces (trimmed existing planes excluded). Non-destructive: the bar is restored to the end in finally; nothing is saved.",
+  "description": "Analyzes the active part document without modifying it. Does NOT increment state_version. analysis_type='mass_properties': returns volume, surface_area, center of gravity (cx/cy/cz). analysis_type='geometry': returns bodies, faces, edges, vertices counts (solid bodies), surface_bodies and box_m (IPartDoc.GetPartBox, surfaces included). analysis_type='edges': returns one JSON object listing every solid edge with start/end/midpoint 3D coords (meters, rounded to 6 decimals; closed/circular edges also include length) — pick an edge index (the `i` field) for add_edge_feature edge_indices, or a midpoint for coordinate selection. Slowest mode on very large parts (COM-bound). analysis_type='faces': returns one JSON object listing every solid face with a stable index `i` (planar faces also carry normal, area, and a representative on-plane point) — pick a face index for create_sketch(on_face, face_index). analysis_type='features': the COMPACT part recipe (default 'understand the part' read) — ordered feature tree (name/type, suppressed only when true), deduped driving dimensions (SI, rounded to 6 decimals), a per-sketch SUMMARY (segment counts + an inline {cx,cy,r} for single-full-circle profiles; NO per-segment coordinate dump), each sketch's plane {ref:'Front/Top/Right Plane', offset}, each extrude/cut's {end, depth (blind only), reversed}, pattern semantics, and equations + globals; features are in tree (history) order. analysis_type='sketch' (requires 'name'): ONE sketch's full geometry (every segment, rounded to 6 decimals) + plane — use only when exact sketch coordinates are needed. analysis_type='feature_map': per-feature geometry ATTRIBUTION — walks the tree base→end with the ROLLBACK BAR (swMoveRollbackBarTo_e) and diffs the topology between stops inside the tool; consumed_edges (both endpoints gone — trimmed neighbours excluded) are the deterministic fillet/chamfer edge anchors (PRE-feature geometry), created_faces are genuinely new surfaces (trimmed existing planes excluded). Non-destructive: the bar is restored to the end in finally; nothing is saved.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -481,6 +482,37 @@
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {component, fixed, transform}."
+ },
+ "replace_component": {
+  "description": "Replaces the file of a top-level component of the active assembly (selected, IAssemblyDoc.ReplaceComponents2 with swReplaceComponentsConfiguration_MatchName), optionally all instances of the same file, then rebuilds and reads back the instances now using the new file and their transform change. Does not save. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "component": "string (required — top-level instance name, Name2)",
+    "file_path": "string (required — replacement .sldprt / .sldasm)",
+    "all_instances": "boolean (optional, default true)",
+    "configuration": "string (optional — configuration of the new file)",
+    "reattach_mates": "boolean (optional, default true)"
+   }
+  },
+  "output": "→ see execution-response.json — Features[0] = JSON {assembly, old_file, new_file, replaced_count, replaced:[{component, transform_change}], moved_count, still_old_file, note}"
+ },
+ "insert_part": {
+  "description": "Active part: inserts another part's bodies at its origin (IPartDoc.InsertPart3 with swInsertPartOptions_e: solids 1, surfaces 2, break link 512, propagate visual properties, don't zoom), rebuilds, optionally hides the part's surface bodies (IBody2.HideBody). Does not save. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "file_path": "string (required — the part whose bodies are inserted)",
+    "solids": "boolean (optional, default true)",
+    "surfaces": "boolean (optional, default false)",
+    "break_link": "boolean (optional, default true — no external reference)",
+    "hide_surface_bodies": "boolean (optional, default false)",
+    "configuration": "string (optional — configuration of the inserted part)"
+   }
+  },
+  "output": "→ see execution-response.json — Features[0] = JSON {feature, feature_type, source, link_broken, solid_bodies_before/after, surface_bodies_before/after, surface_bodies_hidden, box_m, note}"
  },
  "screenshot": {
   "description": "Saves the active document's graphics view as a PNG (IModelDoc2.SaveBMP to a temporary BMP, converted with System.Drawing); the document file is never written. Optionally switches to a standard view orientation (IModelDoc2.ShowNamedView2 with swStandardViews_e) and zooms to fit first, and draws an optional caption band under the image. Changes only the on-screen view; does NOT increment state_version.",

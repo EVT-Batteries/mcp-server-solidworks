@@ -224,6 +224,8 @@ namespace SolidworksExecution.Controllers
                 case "create_3d_path":         return _service.CreatePath3D(request);
                 case "sweep_circular":         return _service.SweepCircular(request);
                 case "place_component":        return _service.PlaceComponent(request);
+                case "replace_component":      return _service.ReplaceComponent(request);
+                case "insert_part":            return _service.InsertPart(request);
                 case "check_rebuild":          return _service.CheckRebuild(request);
                 case "component_status":       return _service.ComponentStatus(request);
                 case "set_component_state":    return _service.SetComponentState(request);

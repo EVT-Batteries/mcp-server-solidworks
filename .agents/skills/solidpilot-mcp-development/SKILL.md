@@ -235,6 +235,17 @@ Results are in `$r.cadState.features` (often one JSON string).
     current sketch points and merges at 10 um. The import writes `Harness_<n>-<asm>.SLDASM` plus
     its fromToList / segmentList XML next to the assembly at once; a failed import still uses
     up a number, and a deleted route leaves its files behind (delete them).
+- **Surface bodies and large models (2026-11-12)**: sheet bodies (an assembly saved as part with
+  "exterior faces") are invisible to `GetBodies2(swSolidBody)`, face / edge queries and
+  interference detection; `analyze_model('geometry')` now reports `surface_bodies` and the part
+  box (`IPartDoc.GetPartBox(true)`, surfaces included). `ReplaceComponents2` re-attaches mates
+  only to matching geometry, so a re-imported model breaks them; `IPartDoc.InsertPart3` (solids
+  1, break link 512) adds bodies to the existing file instead, and hidden sheet bodies keep
+  carrying mates. Save-as-part geometry is the user preference `swSaveAssemblyAsPartOptions`
+  (201; `swSaveAsmAsPartOptions_e` 1 all components, 2 exterior components, 3 exterior faces).
+  A replaced instance is renamed after the new file (and may be renumbered). Per-component COM
+  loops over a 1000-component assembly (mates of every match, or faces of a 9000-face part) run
+  for many minutes: name components, and stop the execution server to abort a read-only call.
 
 ## Committing
 

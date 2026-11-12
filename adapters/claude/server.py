@@ -95,6 +95,7 @@ LONG_TOOLS = {
     "set_component_state", "import_step", "measure_curves", "manage_configurations",
     "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
     "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
+    "replace_component", "insert_part",
 }
 
 
@@ -518,6 +519,64 @@ def place_component(
     if fixed is not None:
         params["fixed"] = fixed
     return _call("place_component", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: replace_component
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def replace_component(
+    component: str,
+    file_path: str,
+    all_instances: bool = True,
+    configuration: str = "",
+    reattach_mates: bool = True,
+) -> str:
+    """Replace the file a component of the ACTIVE assembly uses with another part or assembly
+    (IAssemblyDoc.ReplaceComponents2), keeping each instance's transform, e.g. a surface-only
+    supplier model by a solid one. Bumps state_version; does NOT save (local copies only).
+    component: a TOP-LEVEL instance name of the active assembly (Name2, e.g. 'Module-3'); for a
+        component inside a sub-assembly, open that sub-assembly (open_document) and replace it
+        there, then save it.
+    file_path: the replacement .SLDPRT / .SLDASM.
+    all_instances: also replace every other instance of the same file at this level.
+    configuration: configuration of the new file ('' = matched by name, else its default).
+    reattach_mates: let SOLIDWORKS re-attach mates to the new geometry (mates on faces that do
+        not exist in the new file break: check_rebuild).
+    Mates are re-attached by SOLIDWORKS only where the new file has matching geometry: replacing a
+    surface-only model by a re-imported solid one breaks every mate on it (found 2026-11-12: 57
+    broken mates). To make such a model solid, use insert_part on the model itself instead.
+    Returns replaced instances (with their largest transform change, which should be 0),
+    still_old_file (instances not replaced) and moved_count."""
+    return _call("replace_component", {
+        "component": component, "file_path": file_path, "all_instances": all_instances,
+        "configuration": configuration, "reattach_mates": reattach_mates})
+
+
+# ---------------------------------------------------------------------------
+# Tool: insert_part
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def insert_part(
+    file_path: str,
+    solids: bool = True,
+    surfaces: bool = False,
+    break_link: bool = True,
+    hide_surface_bodies: bool = False,
+    configuration: str = "",
+) -> str:
+    """Insert another part's bodies into the ACTIVE PART at its origin (IPartDoc.InsertPart3;
+    local copies only). Bumps state_version; does NOT save.
+    Typical use: a supplier model saved as surfaces ('exterior faces') is mated in assemblies by
+    those surfaces, but interference checks and face queries see only solids. Insert the solid
+    bodies of the same model (open its STEP as an assembly, save_document(assembly_as_part=
+    'exterior_components'), check analyze_model(geometry) box_m matches) into it and set
+    hide_surface_bodies=True: the mates keep their surfaces, the solids do the checking.
+    break_link: the inserted bodies become plain geometry (no reference to file_path).
+    Returns the feature, solid / surface body counts before and after, and box_m."""
+    return _call("insert_part", {
+        "file_path": file_path, "solids": solids, "surfaces": surfaces, "break_link": break_link,
+        "hide_surface_bodies": hide_surface_bodies, "configuration": configuration})
 
 
 # ---------------------------------------------------------------------------
@@ -1173,13 +1232,22 @@ def close_document(save: bool = False, close_all: bool = False) -> str:
 # Tool: save_document
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
-def save_document(file_path: str = "") -> str:
+def save_document(
+    file_path: str = "",
+    assembly_as_part: Literal["", "all_components", "exterior_components", "exterior_faces"] = "",
+) -> str:
     """Save the active SolidWorks document to disk.
     file_path: full output path including the document extension
     (.sldprt for parts, .sldasm for assemblies, .slddrw for drawings).
     If omitted, saves in place (only works if the document was saved before).
-    A part must be saved to disk before it can be referenced by a drawing view."""
-    return _call("save_document", {"file_path": file_path})
+    A part must be saved to disk before it can be referenced by a drawing view.
+    assembly_as_part (active ASSEMBLY, file_path ending .sldprt): save a COPY of the assembly as
+    one part (the assembly stays active and unchanged): 'exterior_components' = solid bodies of
+    the components visible from outside (light and still solid: suppress internal components
+    such as cells first), 'all_components' = solid bodies of every resolved component,
+    'exterior_faces' = surfaces only (lightest, but interference checks, face queries and mates
+    cannot use them). Returns saved_part and its size."""
+    return _call("save_document", {"file_path": file_path, "assembly_as_part": assembly_as_part})
 
 
 # ---------------------------------------------------------------------------
@@ -1197,7 +1265,9 @@ def analyze_model(
 ) -> str:
     """Analyze the active SolidWorks part document (read-only, does NOT change state).
     analysis_type='mass_properties': returns volume, surface_area, center of gravity (cx, cy, cz) in document units.
-    analysis_type='geometry': returns bodies, faces, edges, vertices counts of all solid bodies.
+    analysis_type='geometry': returns bodies, faces, edges, vertices counts of all solid bodies,
+    surface_bodies (count; surface bodies are invisible to faces / edges / interference) and
+    box_m (part bounding box incl. surfaces, [xmin,ymin,zmin,xmax,ymax,zmax]: compare frames).
     analysis_type='bodies': PER-BODY fingerprints for multibody parts (e.g. a flattened assembly
         STEP import): volume, area, centroid, edge/vertex counts, and the body's face-index RANGE
         in the same enumeration 'faces' walks — segment the faces list per body with it.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -93,6 +94,17 @@ namespace SolidworksExecution.Services
                     results.Add($"faces={totalFaces}");
                     results.Add($"edges={totalEdges}");
                     results.Add($"vertices={totalVerts}");
+                    // Surface bodies (e.g. an assembly saved as part with 'exterior faces') are
+                    // invisible to the solid queries above, to face queries and to interference.
+                    object[] sheets = partDoc.GetBodies2((int)swBodyType_e.swSheetBody, true) as object[];
+                    results.Add($"surface_bodies={(sheets != null ? sheets.Length : 0)}");
+                    // Part bounding box (all bodies, surfaces included), meters: compares frames.
+                    try
+                    {
+                        if (partDoc.GetPartBox(true) is double[] bx && bx.Length >= 6)
+                            results.Add("box_m=[" + string.Join(",", bx.Take(6).Select(v => Math.Round(v, 6).ToString(System.Globalization.CultureInfo.InvariantCulture))) + "]");
+                    }
+                    catch { }
                 }
                 else if (analysisType == "bodies")
                 {

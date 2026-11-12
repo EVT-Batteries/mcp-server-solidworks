@@ -674,6 +674,64 @@ namespace SolidworksExecution.Services
 
                 int saveErrors = 0, saveWarnings = 0;
                 bool success;
+                var extra = new JObject();
+
+                // Assembly saved as a part: which geometry goes in (user preference
+                // swSaveAssemblyAsPartOptions = 201; swSaveAsmAsPartOptions_e: 1 all components,
+                // 2 exterior components, 3 exterior faces). Exterior faces gives surfaces only,
+                // which interference / face queries cannot use; components keep solid bodies.
+                string asPart = (p?.Value<string>("assembly_as_part") ?? "").Trim().ToLowerInvariant();
+                if (asPart.Length > 0)
+                {
+                    int opt = asPart == "all_components" ? 1 : asPart == "exterior_components" ? 2 : asPart == "exterior_faces" ? 3 : 0;
+                    if (opt == 0)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "assembly_as_part must be all_components, exterior_components or exterior_faces.");
+                    if (!(modelDoc is IAssemblyDoc))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "WRONG_DOCUMENT_TYPE", "assembly_as_part needs an active assembly.");
+                    if (string.IsNullOrEmpty(filePath) || !filePath.EndsWith(".sldprt", StringComparison.OrdinalIgnoreCase))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "assembly_as_part needs file_path ending in .sldprt.");
+                    string dir0 = System.IO.Path.GetDirectoryName(filePath);
+                    if (!string.IsNullOrEmpty(dir0) && !System.IO.Directory.Exists(dir0))
+                        System.IO.Directory.CreateDirectory(dir0);
+                    int prevOpt = _solidWorks.GetUserPreferenceIntegerValue(201);
+                    _solidWorks.SetUserPreferenceIntegerValue(201, opt);
+                    try
+                    {
+                        success = modelDoc.Extension.SaveAs3(filePath,
+                            (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent | (int)swSaveAsOptions_e.swSaveAsOptions_Copy,
+                            null, null, ref saveErrors, ref saveWarnings);
+                    }
+                    finally { _solidWorks.SetUserPreferenceIntegerValue(201, prevOpt); }
+                    if (!success)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "SAVE_FAILED", $"Save as part failed. Errors: {saveErrors}, Warnings: {saveWarnings}.");
+                    extra["saved_part"] = filePath;
+                    extra["assembly_as_part"] = asPart;
+                    try { extra["size_bytes"] = new System.IO.FileInfo(filePath).Length; } catch { }
+                    var r0 = new ExecutionResponse
+                    {
+                        OperationId = request.OperationId,
+                        Status = "COMPLETED",
+                        Verified = true,
+                        StateVersion = _guard.GetCurrentStateVersion(),
+                        CadState = new CadState
+                        {
+                            StateVersion = _guard.GetCurrentStateVersion(),
+                            ActiveDocument = modelDoc.GetTitle(),
+                            DocumentType = "ASSEMBLY",
+                            ActiveSketch = null,
+                            Features = new List<string> { extra.ToString(Newtonsoft.Json.Formatting.None) },
+                            Dimensions = new List<string>()
+                        },
+                        Error = null
+                    };
+                    _guard.RegisterCompleted(request.OperationId, r0);
+                    return r0;
+                }
 
                 if (string.IsNullOrEmpty(filePath))
                 {

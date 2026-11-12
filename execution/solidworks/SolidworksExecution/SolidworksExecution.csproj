@@ -107,6 +107,7 @@
     <Compile Include="Services\SolidWorksService.Screenshot.cs" />
     <Compile Include="Services\SolidWorksService.Path3D.cs" />
     <Compile Include="Services\SolidWorksService.Placement.cs" />
+    <Compile Include="Services\SolidWorksService.Replace.cs" />
     <Compile Include="Services\SolidWorksService.Health.cs" />
     <Compile Include="Services\SolidWorksService.ComponentState.cs" />
     <Compile Include="Services\SolidWorksService.Configuration.cs" />
