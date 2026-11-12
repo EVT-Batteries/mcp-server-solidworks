@@ -157,11 +157,41 @@ namespace SolidworksExecution.Services
                                 }
                             }
                             catch { }
+                            AddBodyBox(bj, body);
                             arr.Add(bj);
                         }
                     }
                     root["body_count"] = arr.Count;
                     root["bodies"] = arr;
+                    // Surface (sheet) bodies: not in the face enumeration above, so no face_start.
+                    // A supplier model saved as "exterior faces" keeps one sheet body per visible
+                    // component, which tells which solid bodies reach the outside.
+                    var sheetsArr = new JArray();
+                    if (partDoc.GetBodies2((int)swBodyType_e.swSheetBody, false) is object[] sheetBodies)
+                    {
+                        int sidx = 0;
+                        foreach (var b in sheetBodies)
+                        {
+                            if (!(b is IBody2 body)) continue;
+                            var sj = new JObject { ["i"] = sidx++ };
+                            try { if (!string.IsNullOrEmpty(body.Name)) sj["name"] = body.Name; } catch { }
+                            try { sj["visible"] = body.Visible; } catch { }
+                            sj["face_count"] = body.GetFaceCount();
+                            try
+                            {
+                                var mp = body.GetMassProperties(1.0) as double[];
+                                if (mp != null && mp.Length >= 5) sj["area"] = mp[4];
+                            }
+                            catch { }
+                            AddBodyBox(sj, body);
+                            sheetsArr.Add(sj);
+                        }
+                    }
+                    if (sheetsArr.Count > 0)
+                    {
+                        root["surface_body_count"] = sheetsArr.Count;
+                        root["surface_bodies"] = sheetsArr;
+                    }
                     results.Add(root.ToString(Newtonsoft.Json.Formatting.None));
                 }
                 else if (analysisType == "edges")
@@ -1925,6 +1955,20 @@ namespace SolidworksExecution.Services
             }
             catch { }
             return arr;
+        }
+
+        // Axis-aligned box of a body in part coordinates (m): "box": [xmin, ymin, zmin, xmax, ymax, zmax].
+        private static void AddBodyBox(JObject j, IBody2 body)
+        {
+            try
+            {
+                var bb = body.GetBodyBox() as double[];
+                if (bb == null && body.GetBodyBox() is object[] ob) bb = Array.ConvertAll(ob, o => (double)o);
+                if (bb != null && bb.Length >= 6)
+                    j["box"] = new JArray { Math.Round(bb[0], 6), Math.Round(bb[1], 6), Math.Round(bb[2], 6),
+                                            Math.Round(bb[3], 6), Math.Round(bb[4], 6), Math.Round(bb[5], 6) };
+            }
+            catch { }
         }
     }
 }

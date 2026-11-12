@@ -1289,7 +1289,10 @@ def analyze_model(
     box_m (part bounding box incl. surfaces, [xmin,ymin,zmin,xmax,ymax,zmax]: compare frames).
     analysis_type='bodies': PER-BODY fingerprints for multibody parts (e.g. a flattened assembly
         STEP import): volume, area, centroid, edge/vertex counts, and the body's face-index RANGE
-        in the same enumeration 'faces' walks — segment the faces list per body with it.
+        in the same enumeration 'faces' walks — segment the faces list per body with it — and box
+        ([xmin,ymin,zmin,xmax,ymax,zmax], m). Surface bodies follow in surface_bodies (name,
+        visible, face_count, area, box; no face range): in a model saved as "exterior faces"
+        they show which components reach the outside and how many of their faces are visible.
     analysis_type='edges': returns a JSON object listing EVERY solid edge with its start/end/MIDPOINT 3D coords
         in meters (rounded to 6 decimals; closed/circular edges also report length) and a stable index `i`. Use
         the index `i` for add_edge_feature(edge_indices=...) — robust for crowded/concave edges — or a MIDPOINT
