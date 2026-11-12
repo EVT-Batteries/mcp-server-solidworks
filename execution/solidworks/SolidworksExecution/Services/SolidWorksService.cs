@@ -733,17 +733,69 @@ namespace SolidworksExecution.Services
                     return r0;
                 }
 
+                // Modified references of an assembly (route sub-assemblies and connector parts after
+                // a from-to import, components rebuilt or resolved by checks) are NOT written by
+                // Save3 of the assembly alone: save them first, children before the assembly.
+                // Only files under reference_root (default: the assembly's folder tree) and never a
+                // released library file; the rest is reported, not saved.
+                var savedRefs = new JArray();
+                var skippedRefs = new JArray();
+                bool unchanged = false;
+                bool saveRefs = p?.Value<bool?>("save_references") ?? true;
+                if (saveRefs && string.IsNullOrEmpty(filePath) && modelDoc is IAssemblyDoc asmForRefs
+                    && !string.IsNullOrEmpty(modelDoc.GetPathName()))
+                {
+                    string root = p?.Value<string>("reference_root");
+                    if (string.IsNullOrWhiteSpace(root)) root = System.IO.Path.GetDirectoryName(modelDoc.GetPathName());
+                    root = NormalizeDir(root);
+                    var refPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (asmForRefs.GetComponents(false) is object[] comps)
+                        foreach (var o in comps)
+                        {
+                            if (!(o is IComponent2 c)) continue;
+                            bool isVirtual = false;
+                            try { isVirtual = c.IsVirtual; } catch { }
+                            string cp = c.GetPathName();
+                            if (!isVirtual && !string.IsNullOrEmpty(cp)) refPaths.Add(NormalizePath(cp));
+                        }
+                    // Deepest documents first: parts, then sub-assemblies, by path depth is not
+                    // enough; save parts first, then assemblies.
+                    var dirty = DirtyOpenDocuments().Where(d => refPaths.Contains(NormalizePath(d.GetPathName()))).ToList();
+                    foreach (var d in dirty.OrderBy(d => d is IAssemblyDoc ? 1 : 0))
+                    {
+                        string dp = d.GetPathName();
+                        string why = SaveBlockReason(dp, root);
+                        if (why != null) { skippedRefs.Add(new JObject { ["file"] = dp, ["reason"] = why }); continue; }
+                        int e1 = 0, w1 = 0;
+                        bool ok1 = d.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref e1, ref w1);
+                        if (ok1) savedRefs.Add(dp);
+                        else skippedRefs.Add(new JObject { ["file"] = dp, ["reason"] = $"save failed (errors {e1}, warnings {w1})" });
+                    }
+                }
+
                 if (string.IsNullOrEmpty(filePath))
                 {
                     // Save in place — requires the document to already have a path on disk.
                     if (string.IsNullOrEmpty(modelDoc.GetPathName()))
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "MISSING_PARAMETER", "Document has never been saved; file_path is required for the first save (full path including .sldprt/.sldasm/.slddrw extension).");
-                    success = modelDoc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref saveErrors, ref saveWarnings);
+                    string block = SaveBlockReason(modelDoc.GetPathName(), null);
+                    if (block != null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "SAVE_REFUSED", block);
+                    // An unmodified document is not rewritten (Save3 would still write the file and
+                    // show a change in version control); force=True writes it anyway.
+                    bool force = p?.Value<bool?>("force") ?? false;
+                    bool dirtyNow = true;
+                    try { dirtyNow = modelDoc.GetSaveFlag(); } catch { }
+                    if (!dirtyNow && !force) { success = true; unchanged = true; }
+                    else success = modelDoc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref saveErrors, ref saveWarnings);
                 }
                 else
                 {
                     // SaveAs to an explicit path. Ensure output directory exists.
+                    string blockAs = SaveBlockReason(filePath, null);
+                    if (blockAs != null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "SAVE_REFUSED", blockAs);
                     string dir = System.IO.Path.GetDirectoryName(filePath);
                     if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
                         System.IO.Directory.CreateDirectory(dir);
@@ -761,6 +813,17 @@ namespace SolidworksExecution.Services
 
                 // Saving does not change CAD geometry — state_version is unchanged (same as export).
                 string savedPath = modelDoc.GetPathName();
+                // Everything still modified in the session: nothing is left behind silently.
+                var stillDirty = new JArray(DirtyOpenDocuments().Select(d =>
+                    string.IsNullOrEmpty(d.GetPathName()) ? d.GetTitle() : d.GetPathName()));
+                var report = new JObject
+                {
+                    ["saved"] = savedPath,
+                    ["unchanged"] = unchanged,
+                    ["saved_references"] = savedRefs,
+                    ["skipped_references"] = skippedRefs,
+                    ["unsaved_open_documents"] = stillDirty
+                };
                 var response = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
@@ -773,7 +836,7 @@ namespace SolidworksExecution.Services
                         ActiveDocument = modelDoc.GetTitle(),
                         DocumentType = modelDoc is IDrawingDoc ? "DRAWING" : (modelDoc is IAssemblyDoc ? "ASSEMBLY" : "PART"),
                         ActiveSketch = null,
-                        Features = new List<string> { savedPath },
+                        Features = new List<string> { savedPath, report.ToString(Newtonsoft.Json.Formatting.None) },
                         Dimensions = new List<string>()
                     },
                     Error = null

@@ -246,6 +246,16 @@ Results are in `$r.cadState.features` (often one JSON string).
   A replaced instance is renamed after the new file (and may be renumbered). Per-component COM
   loops over a 1000-component assembly (mates of every match, or faces of a 9000-face part) run
   for many minutes: name components, and stop the execution server to abort a read-only call.
+- **Saving (2026-11-12)**: `IModelDoc2.Save3` of an assembly does not write its modified
+  references (route sub-assemblies, connector parts after a routing import, components rebuilt
+  or resolved by checks); on an unmodified document it still rewrites the file. `save_document`
+  therefore saves the modified open documents among the assembly's components first
+  (`ISldWorks.GetDocuments` + `GetSaveFlag`, parts before assemblies, only under
+  `reference_root`, virtual `\VC~~\` documents skipped), skips unmodified documents unless
+  `force`, and reports `unsaved_open_documents`. Paths matching a fragment of the env variable
+  `SOLIDPILOT_READONLY_PATHS` (inherited from the adapter) are refused. Inside the C# server,
+  `Environment` is ambiguous with `SolidWorks.Interop.sldworks.Environment`: write
+  `System.Environment`.
 
 ## Committing
 

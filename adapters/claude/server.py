@@ -1235,19 +1235,37 @@ def close_document(save: bool = False, close_all: bool = False) -> str:
 def save_document(
     file_path: str = "",
     assembly_as_part: Literal["", "all_components", "exterior_components", "exterior_faces"] = "",
+    save_references: bool = True,
+    reference_root: str = "",
+    force: bool = False,
 ) -> str:
     """Save the active SolidWorks document to disk.
     file_path: full output path including the document extension
     (.sldprt for parts, .sldasm for assemblies, .slddrw for drawings).
     If omitted, saves in place (only works if the document was saved before).
     A part must be saved to disk before it can be referenced by a drawing view.
+    save_references (in-place save of an ASSEMBLY, default True): first save every modified
+    document it references (parts, then sub-assemblies): route sub-assemblies and connector
+    parts after a routing import, components rebuilt or resolved by checks. SOLIDWORKS does not
+    write them with the assembly. Only files under reference_root (default: the assembly's
+    folder tree); files outside it are listed in skipped_references, never saved.
+    Read-only locations (env SOLIDPILOT_READONLY_PATHS, ';'-separated path fragments, e.g.
+    released CAD in a synced library) are never written: SAVE_REFUSED.
+    An in-place save of a document SOLIDWORKS does not mark as modified writes nothing
+    (unchanged=true; the file would otherwise show as changed in version control); force=True
+    writes it anyway.
+    Returns the saved path, then JSON {saved, unchanged, saved_references, skipped_references,
+    unsaved_open_documents}: documents still modified in the session (e.g. a top assembly
+    whose components were resolved by checks): save or knowingly leave them, never ignore.
     assembly_as_part (active ASSEMBLY, file_path ending .sldprt): save a COPY of the assembly as
     one part (the assembly stays active and unchanged): 'exterior_components' = solid bodies of
     the components visible from outside (light and still solid: suppress internal components
     such as cells first), 'all_components' = solid bodies of every resolved component,
     'exterior_faces' = surfaces only (lightest, but interference checks, face queries and mates
     cannot use them). Returns saved_part and its size."""
-    return _call("save_document", {"file_path": file_path, "assembly_as_part": assembly_as_part})
+    return _call("save_document", {"file_path": file_path, "assembly_as_part": assembly_as_part,
+                                   "save_references": save_references,
+                                   "reference_root": reference_root, "force": force})
 
 
 # ---------------------------------------------------------------------------

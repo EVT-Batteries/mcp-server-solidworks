@@ -153,6 +153,56 @@ namespace SolidworksExecution.Services
             }
         }
 
+        // ---- save helpers (save_document) -------------------------------------------------
+
+        private static string NormalizePath(string p)
+        {
+            if (string.IsNullOrEmpty(p)) return "";
+            try { return System.IO.Path.GetFullPath(p).TrimEnd('\\'); } catch { return p.TrimEnd('\\'); }
+        }
+
+        private static string NormalizeDir(string d) => NormalizePath(d) + "\\";
+
+        /// <summary>Open documents SOLIDWORKS marks as modified (IModelDoc2.GetSaveFlag), virtual
+        /// components (route tubes, stored inside their assembly) excluded.</summary>
+        private List<IModelDoc2> DirtyOpenDocuments()
+        {
+            var list = new List<IModelDoc2>();
+            if (_solidWorks.GetDocuments() is object[] docs)
+                foreach (var o in docs)
+                {
+                    if (!(o is IModelDoc2 d)) continue;
+                    bool dirty = false;
+                    try { dirty = d.GetSaveFlag(); } catch { }
+                    if (!dirty) continue;
+                    string p = d.GetPathName() ?? "";
+                    if (p.IndexOf("\\VC~~\\", StringComparison.OrdinalIgnoreCase) >= 0) continue;  // virtual
+                    list.Add(d);
+                }
+            return list;
+        }
+
+        /// <summary>Why a file must not be saved, or null. Read-only locations (e.g. released CAD
+        /// in a synced document library) come from the environment variable
+        /// SOLIDPILOT_READONLY_PATHS: ';'-separated path fragments, case-insensitive (set it in
+        /// adapters/claude/.env or the MCP server's env; the execution server inherits it).
+        /// With a root, only files under it.</summary>
+        private static string SaveBlockReason(string path, string rootDir)
+        {
+            if (string.IsNullOrEmpty(path)) return "never saved (no path)";
+            string full = NormalizePath(path);
+            string ro = System.Environment.GetEnvironmentVariable("SOLIDPILOT_READONLY_PATHS") ?? "";
+            foreach (var frag in ro.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string f = frag.Trim();
+                if (f.Length > 0 && full.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return $"read-only location ('{f}' in SOLIDPILOT_READONLY_PATHS)";
+            }
+            if (rootDir != null && !full.StartsWith(rootDir, StringComparison.OrdinalIgnoreCase))
+                return "outside reference_root " + rootDir;
+            return null;
+        }
+
         // insert_part: bring another part's bodies into the ACTIVE part (IPartDoc.InsertPart3), e.g.
         // the solid bodies of a supplier model into its surface-only version: the surfaces the
         // assembly mates reference stay, the solids make interference / face queries work.
