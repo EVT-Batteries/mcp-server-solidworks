@@ -232,7 +232,8 @@ def import_step(file_path: str, save_as: str = "", overwrite: bool = False) -> s
     It imports the file (as open_document does), saves the import as a .SLDPRT (an assembly STEP
     becomes one multi-body part), closes the import document and reopens the saved part.
     save_as: the .SLDPRT path (default: next to the source, same name). Fails with FILE_EXISTS
-    when it exists, unless overwrite=True. Never point save_as at SharePoint / OneDrive CAD.
+    when it exists, unless overwrite=True. Never point save_as at shared or released CAD (see
+    SOLIDPILOT_READONLY_PATHS under save_document).
     Returns source, part (path), imported_as (PART / ASSEMBLY), solid_bodies, surface_bodies,
     box_min / box_max / size (m) and a warning when the import has no solid body. Bumps
     state_version."""
@@ -1520,13 +1521,11 @@ def import_from_to(
     """Import wires from a from-to list into the ACTIVE ASSEMBLY (SOLIDWORKS Routing
     'Start by From/To', IRouteManager.ImportFromToList). Bumps state_version.
     from_to: the from-to .xlsx (first sheet; headers Wire, Spec, From Ref, Partno, Pin, To Ref,
-        Partno, Pin, Color). For an Altium harness make it with the altium-librairies tool
-        tools/altium_to_solidworks (fromto command) from the OutJob 'Manufacturing Data'.
-    cable_library: the cable/wire library XML whose WireName = each Spec (e.g. that tool's
-        routing-library/evt-cable.xml). Pass it explicitly.
+        Partno, Pin, Color), typically exported from the electrical (ECAD) harness design.
+    cable_library: the cable/wire library XML whose WireName = each Spec. Pass it explicitly.
     component_library: optional when the connectors are already placed (use_existing_assembly).
     references: JSON {component instance: reference designator}, set before the import
-        (IComponent2.ComponentReference), e.g. '{"P1_DTM06-6S-1": "P1"}': the list's From/To Ref
+        (IComponent2.ComponentReference), e.g. '{"Plug-1": "P1"}': the list's From/To Ref
         are matched to these. Each connector needs a connection point (add_routing_point).
         Only resolved components count: for a harness used in several configurations, import
         once per configuration (activate it, the other instances suppressed) and suppress each

@@ -1,6 +1,6 @@
-# EVT fork of SolidPilot: what was added, and what to do next
+# Fork of SolidPilot: what was added, and what to do next
 
-This fork (`EVT-Batteries/mcp-server-solidworks`) adds tools for routed geometry (cables, wire
+This fork adds tools for routed geometry (cables, wire
 bundles, tubes), measurement and assembly health to upstream SolidPilot. They were built and
 tested against SolidWorks 2026 SP2 (34.2.1) between 2026-11-09 and 2026-11-10. Development rules,
 build steps and API lessons: [`.agents/skills/solidpilot-mcp-development/SKILL.md`](.agents/skills/solidpilot-mcp-development/SKILL.md).
@@ -75,7 +75,7 @@ adapter tests pass (58 tools).
   sub-assembly's mate group through the component (`IComponent2.FirstFeature`) returned none,
   even when resolved; opening the sub-assembly works. Inside the sub-assembly's own tree the
   instance names can also differ from the names the top shows (seen after Pack and Go:
-  `dtm04-6p_Felix-5` vs `dtm04-6p-1`), so the tool compares component ID chains (`GetID`).
+  `plug_copy-5` vs `plug-1`), so the tool compares component ID chains (`GetID`).
   `fixed` is likewise only reliable for components of the active assembly.
 - **Configurations**: `set_component_state` acts on the active configuration only, and a component
   inserted in one configuration appears in all of them unless `suppress_new_components` is set.
@@ -86,8 +86,9 @@ adapter tests pass (58 tools).
 - **Timeouts do not cancel.** After an adapter timeout the execution server keeps working on the
   call (one STA thread, calls queue behind it); the error says so, but the caller has to check the
   model state before retrying a model-changing call.
-- **Instance names are not stable.** The same component was `Sub-1/dtm04-6p-2` while its
-  sub-assembly was lightweight and `Sub-1/dtm04-6p_Felix-2` once resolved (a Pack and Go copy).
+- **Instance names are not stable.** The same component was `Sub-1/plug-2` while its
+  sub-assembly was lightweight and `Sub-1/plug_copy-2` once resolved (a Pack and Go copy with
+  renamed files).
   Names taken from an earlier listing can stop resolving after a state change; the not-found
   error lists the closest paths, and tools that resolve components re-find them by ID chain.
 - **Resolving one instance resolves its file.** Resolving a lightweight component also resolves
@@ -145,5 +146,5 @@ Most useful first:
    assembly per call).
 9. **Configuration-aware status.** Report a component's suppression in every configuration of
    its parent at once, and set it for several configurations in one call.
-10. **Upstream.** The tools are generic (no EVT names in the code). Consider proposing them to
+10. **Upstream.** The tools are generic (no project, company or user names in the code). Consider proposing them to
    `eyfel/mcp-server-solidworks` (AGPL-3.0; upstream also asks for a CLA).

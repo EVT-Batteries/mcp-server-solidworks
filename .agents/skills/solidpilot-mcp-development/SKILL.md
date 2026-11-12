@@ -259,7 +259,6 @@ Results are in `$r.cadState.features` (often one JSON string).
 
 ## Committing
 
-Commit to the fork only when the user asks. When a change is finished, give the user a
-ready-to-paste commit message instead (subject line, body of what changed and why, the files to
-commit). The commit includes the source, contract, adapter, README and the rebuilt `bin/Debug`
-files; end the message with the session's attribution lines.
+A change is committed as one unit: the source, contract, adapter, README and the rebuilt
+`bin/Debug` files (the tracked build must match the source). When to commit and how the message
+is written follow the rules of the project that uses this repository.

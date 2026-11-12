@@ -106,7 +106,7 @@ namespace SolidworksExecution.Services
             return i >= 0 ? path.Substring(i + 1) : path;
         }
 
-        // "dtm04-6p_Felix-2" -> "dtm04-6p_felix" (instance number dropped, lower case).
+        // "Plug_Copy-2" -> "plug_copy" (instance number dropped, lower case).
         private static string InstanceBase(string leaf)
         {
             leaf = (leaf ?? "").ToLowerInvariant();

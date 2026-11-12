@@ -68,7 +68,9 @@ before the call).
 - A failed `create_3d_path` can leave the 3D sketch open in edit mode, and the next call fails
   with `SKETCH_ACTIVE`; there is no tool to leave a sketch. Either exit the sketch on every error
   path, or add an `exit_sketch` tool.
-- The `T50RFT6`-style tie-mount and battery-module models seen in the field were surface bodies:
-  `analyze_model(faces)` and `check_interference` cannot use them. A `analyze_model` mode that
-  reads surface bodies (bounding box per face, planes) would help locate saddles and connector
-  openings without exporting to STEP.
+- Supplier models are often surface bodies only (e.g. an assembly saved as part with "exterior
+  faces"): `analyze_model(faces)` and `check_interference` cannot use them (the latter lists them
+  as not measured). `analyze_model(geometry)` now reports `surface_bodies`, and `insert_part` can
+  add the solid bodies of the same model; an `analyze_model` mode that reads surface bodies
+  (bounding box per face, planes) would still help locate saddles and connector openings without
+  re-importing.
