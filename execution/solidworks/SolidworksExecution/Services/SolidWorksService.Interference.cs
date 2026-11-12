@@ -182,6 +182,7 @@ namespace SolidworksExecution.Services
                 {
                     var violations = new List<JObject>();
                     var unmeasured = new JArray();
+                    var distances = new JObject();
                     double nearest = double.MaxValue;
                     string nearestPair = null;
                     foreach (var t in targets)
@@ -193,6 +194,7 @@ namespace SolidworksExecution.Services
                             // Measure fails on intersecting bodies: an interfering pair is at 0.
                             if (ignoreSameParent && SameParent(new List<string> { tp, np })) continue;
                             double d = interfering.Contains(tp + "|" + np) ? 0.0 : MinimumDistance(modelDoc, t, n);
+                            if (!compact) distances[tp + " | " + np] = d < 0 ? (JToken)null : Math.Round(d * 1000.0, 3);
                             if (d < 0) { unmeasured.Add(tp + " | " + np); continue; }
                             if (d < nearest) { nearest = d; nearestPair = tp + " | " + np; }
                             if (d < clearance)
@@ -214,6 +216,7 @@ namespace SolidworksExecution.Services
                         ["violation_count"] = violations.Count,
                         ["violations"] = new JArray(violations.Take(limit).ToArray()),
                     };
+                    if (!compact) cj["distances_mm"] = distances;
                     if (nearestPair != null)
                     {
                         cj["nearest_m"] = Math.Round(nearest, 6);
@@ -354,9 +357,62 @@ namespace SolidworksExecution.Services
             near.Add(c);
         }
 
-        // Minimum distance between two components (SolidWorks Measure), in meters; -1 when
-        // SolidWorks cannot measure the pair.
+        // Minimum distance between two components, in meters; -1 when SolidWorks cannot measure
+        // the pair. Measure on two selected components only looks at part of a multi-body
+        // component (a SOLIDWORKS Routing tube, one body per route segment, measured 151 mm from a
+        // bundle lying 0.04 mm from it), so components with several solid bodies are measured
+        // body to body and the smallest distance wins.
         private static double MinimumDistance(IModelDoc2 doc, IComponent2 a, IComponent2 b)
+        {
+            double d = ComponentDistance(doc, a, b);
+            var ba = SolidBodies(a);
+            var bb = SolidBodies(b);
+            if ((ba.Count > 1 || bb.Count > 1) && ba.Count > 0 && bb.Count > 0 && ba.Count * bb.Count <= 2500)
+            {
+                var sm = doc.SelectionManager as ISelectionMgr;
+                foreach (var x in ba)
+                    foreach (var y in bb)
+                    {
+                        double e = BodyDistance(doc, sm, x, y);
+                        if (e >= 0 && (d < 0 || e < d)) d = e;
+                    }
+                doc.ClearSelection2(true);
+            }
+            return d;
+        }
+
+        private static List<IBody2> SolidBodies(IComponent2 c)
+        {
+            var list = new List<IBody2>();
+            try
+            {
+                object info;
+                if (c.GetBodies3(0 /* swSolidBody */, out info) is object[] bodies)
+                    foreach (var o in bodies)
+                        if (o is IBody2 body) list.Add(body);
+            }
+            catch { }
+            return list;
+        }
+
+        private static double BodyDistance(IModelDoc2 doc, ISelectionMgr sm, IBody2 x, IBody2 y)
+        {
+            try
+            {
+                doc.ClearSelection2(true);
+                if (!x.Select2(false, sm?.CreateSelectData() as SelectData)
+                    || !y.Select2(true, sm?.CreateSelectData() as SelectData)) return -1;
+                var m = doc.Extension.CreateMeasure() as IMeasure;
+                if (m == null) return -1;
+                m.ArcOption = 1;   // minimum distance
+                if (!m.Calculate(null)) return -1;
+                double d = m.Distance;
+                return d < 0 ? -1 : d;
+            }
+            catch { return -1; }
+        }
+
+        private static double ComponentDistance(IModelDoc2 doc, IComponent2 a, IComponent2 b)
         {
             try
             {

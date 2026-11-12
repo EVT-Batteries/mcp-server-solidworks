@@ -61,13 +61,13 @@ before the call).
 
 ### 4. Smaller things noticed
 
-- **Clearance between two route tubes.** `check_interference(clearance=...)` lists a route tube
-  of another harness as a neighbour (`compact=False` now prints the `neighbours`), but
-  `IMeasure` reports no distance between two route tube components: two bundles 0.04 mm apart
-  (from their centrelines) were not reported within 5 mm, and the pair was not listed as not
-  measured either. Interference detection does compare them. Find why Measure skips the pair
-  (virtual components? select the bodies instead of the components?) and, failing that, list
-  such pairs as not measured.
+- **Clearance of multi-body components (fixed).** `IMeasure` on two selected components looked
+  at only part of a SOLIDWORKS Routing tube (one body per route segment): it gave 151.5 mm
+  between two bundles 0.04 mm apart. `check_interference` now measures a component with several
+  solid bodies body to body (`IComponent2.GetBodies3`, `IBody2.Select2`, up to 2500 body pairs)
+  and keeps the smallest distance: 0.039 / 0.041 mm, as the route centrelines give.
+  `compact=False` also lists `neighbours` and every pair's `distances_mm`. Large multi-body
+  neighbours make it slower (one Measure per body pair).
 
 - `measure_curves` on a large assembly with `include_geometry` returns well over 100 kB; with
   `as_route` available, consider omitting `per_segment` geometry unless asked.
