@@ -198,6 +198,34 @@ Results are in `$r.cadState.features` (often one JSON string).
   of a part that was not loaded; normalize with `Path.GetFullPath`.
 - **Screenshots**: `IModelDoc2.SaveBMP(path, w, h)` captures the document window (it must be
   visible: activate it first); it never writes the document.
+- **Routing (SOLIDWORKS Routing add-in, `Services/SolidWorksService.Routing.cs`)**: interop
+  `SolidWorks.Interop.SWRoutingLib` is referenced with `EmbedInteropTypes=True` (no extra DLL in
+  `bin/Debug`); use its interfaces (`IRouteManager`, `IElectricalRoute`, `IWire`, `IAutoRoute`,
+  `IRoutingComponentManager`), inline its enums. API help: `api\routingapi.chm` (and
+  `sldworksapi.chm`) decompile with `hh.exe -decompile <outdir> <file>.chm` run from a folder
+  without spaces. Lessons (2026-11-11):
+  - `IAssemblyDoc.GetRouteManager()` is null when the add-in is not loaded. Routing
+    PropertyManager pages (Route Properties after `StartRoute`, the pages after
+    `ImportFromToList`) are accepted with `ISldWorks.RunCommand(-2 /* swCommands_PmOK */, "")`.
+  - `AddToRoute`, `GetAutoRoute` and drawing in the route sketch need route edit mode: select
+    the route feature (`Route1`, type `FabricatedRoute`; skip the `Route Parts` FtrFolder) via
+    `IComponent2.FirstFeature` walk, `IRouteManager.EditRoute()`; leave with `ExitRoute()` +
+    `IAssemblyDoc.EditAssembly()`. The route sub-assembly sits at the identity, so route-sketch
+    coordinates are top-assembly coordinates.
+  - Wires, cut lengths and route properties (`IRouteManager.GetElectricalRoute`) are readable
+    only while the route component is edited: select it, `EditAssembly()`, read,
+    `EditAssembly()` again. `RouteWires()` the same way.
+  - `ImportFromToList` returns false (GUI: "Some header definition(s) are not specified")
+    while any from-to header definition is empty; SOLIDWORKS does not keep them (a fresh
+    install and even each session drops Cable / Core / Other): fill the empty ones with
+    `IRoutingSettings.SetFromToListHeaderDefinitions` before every import. It always creates a
+    NEW route sub-assembly (`Harness_<n>`), also with existing connectors (diff the route
+    sub-assemblies before/after). With connectors already placed, their `ComponentReference`
+    matches the list's From/To Ref and no component library is needed.
+  - `InsertConnectionPoint` needs the exit face (mark 1) and a sketch point (mark 1);
+    `InsertRoutePoint` with only a sketch point selected creates nothing (opens its dialog).
+  - `IWire.GetRouteErrors` reports `violates_bend_radius` against the wire library's
+    `MinBendRadius`.
 
 ## Committing
 

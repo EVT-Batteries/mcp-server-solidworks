@@ -250,6 +250,7 @@ namespace SolidworksExecution.Controllers
                 case "start_route":            return _service.StartRoute(request);
                 case "route_path":             return _service.RoutePath(request);
                 case "import_from_to":         return _service.ImportFromTo(request);
+                case "route_guidelines":       return _service.RouteGuidelines(request);
                 default:                       return null;
             }
         }

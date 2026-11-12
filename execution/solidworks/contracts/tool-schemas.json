@@ -841,5 +841,100 @@
    }
   },
   "output": "-> see execution-response.json - CadState.ActiveDocument = the reopened part; Features[0] = JSON {source, part, imported_as: PART|ASSEMBLY, solid_bodies, surface_bodies?, box_min?, box_max?, size?, warning?}"
+ },
+ "routing_status": {
+  "description": "Read-only SOLIDWORKS Routing state: add-in (GetAddInObject), routing file locations and from-to header definitions (IRoutingSettings); for a part its ConnectionPoint/RoutePoint features and IRoutingComponentManager type; for an assembly its route sub-assemblies (IsRouteAssembly) and, for one route, its wires (IWire: references, pins, GetCuttingLength, GetRouteSegmentIDs, GetRouteErrors, IWireProperty) and segments (IElectricalRoute.GetSketchSegments, IRouteProperty). Does NOT change state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "route": "string (optional - a route sub-assembly instance to read wires and segments from)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm}], cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
+ },
+ "add_routing_point": {
+  "description": "Active part: a 3D sketch point, then a connection point (FeatureManager.InsertConnectionPoint, electrical, face mark 1 + point mark 1) or a route point (InsertRoutePoint), and/or the Routing component type (IRoutingComponentManager.SetComponentType + SetComponentRouteTypeToCustomProperty(electrical)). Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "kind": "string (optional, default 'connection' - 'connection' | 'route' | 'none')",
+    "face_index": "integer (required for 'connection' - the cable exit face, analyze_model(faces) index)",
+    "point": "string (required unless kind='none' - JSON [x,y,z] in meters, part coordinates)",
+    "name": "string (optional - feature name; the point sketch becomes <name>_Sketch)",
+    "component_type": "string (optional - 'connector' | 'clip' | 'splice' | 'equipment')",
+    "diameter": "number (optional, meters - nominal diameter)",
+    "stub_length": "number (optional, meters - default route stub length)",
+    "sub_type": "integer (optional, default 2 - swElectricalConnectionPointType_e)",
+    "reverse": "boolean (optional, default false - flip the exit direction)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {routing, sketch, inserted, feature, feature_type, routing_points, routing_component, warnings?}"
+ },
+ "import_from_to": {
+  "description": "Active assembly: sets component references (IComponent2.ComponentReference), fills empty from-to header definitions (IRoutingSettings.SetFromToListHeaderDefinitions), IRouteManager.ImportFromToList, RunCommand(PmOK) for the pages it opens, finds the new route sub-assembly, optionally IAutoRoute.ConvertGuidelinesToRoute, IElectricalRoute.RouteWires, and reads the route back. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "from_to": "string (required - the from-to list .xlsx)",
+    "cable_library": "string (optional - cable/wire library XML)",
+    "component_library": "string (optional - component library XML)",
+    "references": "string (optional, default '{}' - JSON {component instance: reference designator})",
+    "convert_guidelines": "boolean (optional, default false)",
+    "route_wires": "boolean (optional, default true)",
+    "use_existing_assembly": "boolean (optional, default true)",
+    "overwrite": "boolean (optional, default true)",
+    "search_sub_assemblies": "boolean (optional, default true)",
+    "press_ok": "integer (optional, default 3 - PmOK presses after the import)",
+    "route": "string (optional - route to use when the import makes no new one)",
+    "edit_route_first": "boolean (optional, default false - EditRoute on 'route' before the import)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {imported, new_route?, route?:{component, wires, cables_count, segments}, route_assemblies, steps, warnings?}"
+ },
+ "route_path": {
+  "description": "Active assembly: edits a route (Route feature + IRouteManager.EditRoute, unless one is being edited), adds connection points (AddToRoute), draws a filleted 3D polyline in the route sketch (AddToDB, MergePoints), optionally ExitRoute + EditAssembly + RouteWires. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "route": "string (optional - route sub-assembly instance, when none is being edited)",
+    "points": "string (optional - JSON [[x,y,z],...] in meters, top-assembly coordinates)",
+    "bend_radius": "number (optional, meters - every corner)",
+    "bend_radii": "string (optional - JSON list, one radius per corner)",
+    "add_cpoints": "string (optional - JSON [[component, cpoint],...])",
+    "exit_route": "boolean (optional, default true)",
+    "route_wires": "boolean (optional, default true - after exit)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?}"
+ },
+ "route_guidelines": {
+  "description": "Active assembly: edits a route and converts its guidelines into route geometry (IAutoRoute.ShowGuidelines, SelectGuidelines, ConvertGuidelinesToRoute), optionally exits. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "route": "string (optional - route sub-assembly instance, when none is being edited)",
+    "exit_route": "boolean (optional, default true)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {route, sketch?, steps}"
+ },
+ "start_route": {
+  "description": "Active assembly: selects a component's connection point (or the component), IRouteManager.StartRoute, RunCommand(PmOK) for Route Properties, optionally ExitRoute + EditAssembly. Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "component": "string (required - connector instance)",
+    "cpoint": "string (optional - its connection point feature)",
+    "press_ok": "boolean (optional, default true)",
+    "exit_route": "boolean (optional, default true)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {steps, route_assemblies}"
  }
 }

@@ -500,6 +500,70 @@ namespace SolidworksExecution.Services
             return null;
         }
 
+        // Route sub-assemblies (IsRouteAssembly) anywhere under the assembly.
+        private static List<IComponent2> RouteComponents(IAssemblyDoc asm)
+        {
+            var list = new List<IComponent2>();
+            if (asm.GetComponents(false) is object[] all)
+                foreach (var c in all)
+                {
+                    var cc = c as IComponent2;
+                    var sub = cc?.GetModelDoc2() as IAssemblyDoc;
+                    bool isRoute = false;
+                    try { isRoute = sub != null && sub.IsRouteAssembly(); } catch { }
+                    if (isRoute) list.Add(cc);
+                }
+            return list;
+        }
+
+        // Route the wires of a route sub-assembly through its segments (IElectricalRoute.RouteWires,
+        // available while the route component is edited), back to the top assembly after.
+        private void RouteWiresOn(IModelDoc2 doc, IAssemblyDoc asm, IComponent2 routeComp, JArray steps, JArray warnings)
+        {
+            var routeAsm = routeComp.GetModelDoc2() as IAssemblyDoc;
+            var rrm = routeAsm?.GetRouteManager() as IRouteManager;
+            doc.ClearSelection2(true);
+            routeComp.Select4(false, null, false);
+            asm.EditAssembly();
+            try
+            {
+                var er = rrm?.GetElectricalRoute() as IElectricalRoute;
+                if (er == null) warnings.Add("no electrical route in " + ComponentPath(routeComp));
+                else steps.Add("RouteWires: " + er.RouteWires());
+            }
+            finally { try { asm.EditAssembly(); } catch { } doc.ClearSelection2(true); }
+        }
+
+        // Edit the route, turn its guidelines (the connector pairs a from-to import still has to
+        // wire) into route geometry, leave route editing.
+        private void ConvertGuidelinesOn(IModelDoc2 doc, IAssemblyDoc asm, IRouteManager rm, IComponent2 routeComp,
+                                         JArray steps, JArray warnings)
+        {
+            var rf = RouteFeatureOf(routeComp);
+            if (rf == null) { warnings.Add("convert guidelines: no route feature in " + ComponentPath(routeComp)); return; }
+            doc.ClearSelection2(true);
+            steps.Add($"select {rf.Name}: " + rf.Select2(false, 0));
+            rm.EditRoute();
+            try
+            {
+                var ar = rm.GetAutoRoute() as IAutoRoute;
+                if (ar == null) { warnings.Add("convert guidelines: GetAutoRoute returned nothing"); return; }
+                steps.Add("ShowGuidelines: " + ar.ShowGuidelines());
+                doc.ClearSelection2(true);
+                steps.Add("SelectGuidelines: " + ar.SelectGuidelines());
+                int sel = 0;
+                try { sel = (doc.SelectionManager as ISelectionMgr).GetSelectedObjectCount2(-1); } catch { }
+                steps.Add("guidelines selected: " + sel);
+                if (sel > 0) steps.Add("ConvertGuidelinesToRoute: " + ar.ConvertGuidelinesToRoute());
+                doc.ClearSelection2(true);
+            }
+            finally
+            {
+                try { rm.ExitRoute(); } catch { }
+                try { asm.EditAssembly(); } catch { }
+            }
+        }
+
         // The route feature (Route1) of a route sub-assembly, in the context of the top assembly.
         private static IFeature RouteFeatureOf(IComponent2 routeComp)
         {
@@ -701,6 +765,14 @@ namespace SolidworksExecution.Services
                     try { rm.ExitRoute(); steps.Add("ExitRoute"); } catch (Exception ex) { steps.Add("ExitRoute failed: " + ex.Message); }
                     try { asm.EditAssembly(); steps.Add("EditAssembly"); } catch (Exception ex) { steps.Add("EditAssembly failed: " + ex.Message); }
                     try { doc.ForceRebuild3(false); } catch { }
+                    // Wires (from a from-to import) follow the new geometry: route them, report them.
+                    if (p?.Value<bool?>("route_wires") ?? true)
+                    {
+                        RouteWiresOn(doc, asm, routeComp, steps, warnings);
+                        var er = ReadElectricalRoute(doc, asm, routeComp);
+                        if (er["wires"] is JArray w && w.Count > 0) result["wires"] = w;
+                        if (er["segments"] != null) result["segments"] = er["segments"];
+                    }
                 }
                 result["steps"] = steps;
                 if (warnings.Count > 0) result["warnings"] = warnings;
@@ -793,6 +865,33 @@ namespace SolidworksExecution.Services
                     steps.Add($"{ComponentPath(c)} reference = {c.ComponentReference}");
                 }
 
+                // The import (GUI and API) refuses to run while any from-to header definition is
+                // empty ("Some header definition(s) are not specified", found 2026-11-11; the API
+                // just returns false). Fill only the empty ones; names already set are kept.
+                try
+                {
+                    var rs = _solidWorks.GetRoutingSettings() as IRoutingSettings;
+                    if (rs != null && rs.GetFromToListHeaderDefinitions(out string hw, out string hfr, out string hfp, out string hfpn,
+                            out string htr, out string htp, out string htpn, out string hcab, out string hcore, out string hcol,
+                            out string hspec, out string hoth))
+                    {
+                        string Fill(string v, string d) => string.IsNullOrWhiteSpace(v) ? d : v;
+                        var filled = new JArray();
+                        void Note(string v, string name) { if (string.IsNullOrWhiteSpace(v)) filled.Add(name); }
+                        Note(hw, "wire"); Note(hfr, "from ref"); Note(hfp, "pin"); Note(hfpn, "partno"); Note(htr, "to ref");
+                        Note(htp, "pin"); Note(htpn, "partno"); Note(hcab, "cable"); Note(hcore, "core"); Note(hcol, "color");
+                        Note(hspec, "spec"); Note(hoth, "other");
+                        if (filled.Count > 0)
+                        {
+                            bool set = rs.SetFromToListHeaderDefinitions(Fill(hw, "wire"), Fill(hfr, "from ref"), Fill(hfp, "pin"),
+                                Fill(hfpn, "partno"), Fill(htr, "to ref"), Fill(htp, "pin"), Fill(htpn, "partno"), Fill(hcab, "cable"),
+                                Fill(hcore, "core"), Fill(hcol, "color"), Fill(hspec, "spec"), Fill(hoth, "other"));
+                            steps.Add($"filled empty from-to header definitions ({string.Join(", ", filled)}): {set}");
+                        }
+                    }
+                }
+                catch (Exception ex) { warnings.Add("from-to header definitions: " + ex.Message); }
+
                 bool editRouteFirst = p?.Value<bool?>("edit_route_first") ?? false;
                 doc.ClearSelection2(true);
                 if (editRouteFirst && !string.IsNullOrEmpty(routeName))
@@ -808,9 +907,17 @@ namespace SolidworksExecution.Services
                         doc.ClearSelection2(true);
                     }
                 }
+                bool convertGuidelines = p?.Value<bool?>("convert_guidelines") ?? false;
+                var routesBefore = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var rc in RouteComponents(asm)) routesBefore.Add(ComponentPath(rc));
+
                 bool imported = rm.ImportFromToList(fromTo, compLib, cableLib, useExisting, overwrite, searchSubs);
                 steps.Add("ImportFromToList: " + imported);
-                for (int i = 0; i < pressOk; i++)
+                if (!imported)
+                    warnings.Add("ImportFromToList returned false: check the from-to header definitions " +
+                        "(routing_status from_to_headers), the file paths, and that every Spec is a WireName " +
+                        "of the cable library and every From/To Ref a component reference in the assembly.");
+                for (int i = 0; imported && i < pressOk; i++)
                 {
                     bool ok = _solidWorks.RunCommand(-2 /* swCommands_PmOK */, "");
                     steps.Add($"RunCommand(PmOK) #{i + 1}: {ok}");
@@ -818,29 +925,24 @@ namespace SolidworksExecution.Services
                 }
                 try { steps.Add("edit_target: " + (asm.GetEditTarget() as IModelDoc2)?.GetTitle()); } catch { }
 
-                var result = new JObject();
-                IComponent2 routeComp = string.IsNullOrEmpty(routeName) ? RouteBeingEdited(asm) : FindComponentByName(asm, routeName);
+                var result = new JObject { ["imported"] = imported };
+                // The import builds a new route sub-assembly (Harness_<n>) even with existing
+                // connectors; prefer it over the one named in 'route'.
+                IComponent2 routeComp = null;
+                foreach (var rc in RouteComponents(asm))
+                    if (!routesBefore.Contains(ComponentPath(rc))) { routeComp = rc; result["new_route"] = ComponentPath(rc); break; }
+                if (routeComp == null)
+                    routeComp = string.IsNullOrEmpty(routeName) ? RouteBeingEdited(asm) : FindComponentByName(asm, routeName);
                 // Leave any route / component editing before reading.
                 try { rm.ExitRoute(); } catch { }
                 try { if (asm.GetEditTarget() as IModelDoc2 != doc) asm.EditAssembly(); } catch { }
 
+                if (routeComp != null && convertGuidelines)
+                    ConvertGuidelinesOn(doc, asm, rm, routeComp, steps, warnings);
+
                 if (routeComp != null)
                 {
-                    if (routeWires)
-                    {
-                        var routeAsm = routeComp.GetModelDoc2() as IAssemblyDoc;
-                        var rrm = routeAsm?.GetRouteManager() as IRouteManager;
-                        doc.ClearSelection2(true);
-                        routeComp.Select4(false, null, false);
-                        asm.EditAssembly();
-                        try
-                        {
-                            var er = rrm?.GetElectricalRoute() as IElectricalRoute;
-                            if (er == null) warnings.Add("no electrical route in " + ComponentPath(routeComp));
-                            else steps.Add("RouteWires: " + er.RouteWires());
-                        }
-                        finally { try { asm.EditAssembly(); } catch { } }
-                    }
+                    if (routeWires) RouteWiresOn(doc, asm, routeComp, steps, warnings);
                     result["route"] = ReadElectricalRoute(doc, asm, routeComp);
                 }
                 var routes = new JArray();
@@ -857,6 +959,104 @@ namespace SolidworksExecution.Services
                 result["steps"] = steps;
                 if (warnings.Count > 0) result["warnings"] = warnings;
                 try { doc.ForceRebuild3(false); } catch { }
+
+                var response = new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "COMPLETED",
+                    Verified = true,
+                    StateVersion = _guard.GetCurrentStateVersion() + 1,
+                    CadState = new CadState
+                    {
+                        StateVersion = _guard.GetCurrentStateVersion() + 1,
+                        ActiveDocument = doc.GetTitle(),
+                        DocumentType = "ASSEMBLY",
+                        ActiveSketch = null,
+                        Features = new List<string> { result.ToString(Newtonsoft.Json.Formatting.None) },
+                        Dimensions = new List<string>()
+                    },
+                    Error = null
+                };
+                _guard.RegisterCompleted(request.OperationId, response);
+                return response;
+            }
+            catch (COMException ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
+            }
+        }
+
+        // route_guidelines: after a from-to import, the connector pairs to wire show as guidelines;
+        // turn them into route geometry (IAutoRoute: ShowGuidelines, SelectGuidelines,
+        // ConvertGuidelinesToRoute) while the route is edited (entered here when 'route' is given
+        // and no route is being edited), and report the route sketch.
+        public ExecutionResponse RouteGuidelines(ToolRequest request)
+        {
+            if (_guard.IsDuplicate(request.OperationId))
+                return _guard.GetDuplicate(request.OperationId);
+            if (!_guard.IsStateVersionValid(request.StateVersion))
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
+            if (!EnsureConnected())
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            try
+            {
+                var p = request.Params as JObject;
+                string routeName = p?.Value<string>("route") ?? "";
+                bool exit = p?.Value<bool?>("exit_route") ?? true;
+
+                var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
+                var asm = doc as IAssemblyDoc;
+                if (asm == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "WRONG_DOCUMENT_TYPE", "route_guidelines needs the top assembly active.");
+                var rm = asm.GetRouteManager() as IRouteManager;
+                if (rm == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "ROUTING_NOT_LOADED", "No RouteManager: load the SOLIDWORKS Routing add-in.");
+
+                var steps = new JArray();
+                var routeComp = RouteBeingEdited(asm);
+                if (routeComp == null)
+                {
+                    routeComp = string.IsNullOrEmpty(routeName) ? null : FindComponentByName(asm, routeName);
+                    var rf = routeComp != null ? RouteFeatureOf(routeComp) : null;
+                    if (rf == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "COMPONENT_NOT_FOUND", "No route is being edited; name the route sub-assembly in 'route'.");
+                    doc.ClearSelection2(true);
+                    steps.Add($"select {rf.Name}: " + rf.Select2(false, 0));
+                    rm.EditRoute();
+                    steps.Add("EditRoute");
+                }
+                else steps.Add("already editing " + ComponentPath(routeComp));
+
+                var ar = rm.GetAutoRoute() as IAutoRoute;
+                if (ar == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "AUTOROUTE_UNAVAILABLE", "GetAutoRoute returned nothing (is a route being edited?).");
+                steps.Add("ShowGuidelines: " + ar.ShowGuidelines());
+                doc.ClearSelection2(true);
+                steps.Add("SelectGuidelines: " + ar.SelectGuidelines());
+                try { steps.Add("selected objects: " + (doc.SelectionManager as ISelectionMgr).GetSelectedObjectCount2(-1)); } catch { }
+                steps.Add("ConvertGuidelinesToRoute: " + ar.ConvertGuidelinesToRoute());
+                doc.ClearSelection2(true);
+
+                var result = new JObject { ["route"] = ComponentPath(routeComp) };
+                var sk = doc.SketchManager.ActiveSketch as ISketch;
+                if (sk != null) result["sketch"] = RouteSketchGeometry(sk);
+                if (exit)
+                {
+                    try { rm.ExitRoute(); steps.Add("ExitRoute"); } catch (Exception ex) { steps.Add("ExitRoute failed: " + ex.Message); }
+                    try { asm.EditAssembly(); steps.Add("EditAssembly"); } catch (Exception ex) { steps.Add("EditAssembly failed: " + ex.Message); }
+                    try { doc.ForceRebuild3(false); } catch { }
+                }
+                result["steps"] = steps;
 
                 var response = new ExecutionResponse
                 {

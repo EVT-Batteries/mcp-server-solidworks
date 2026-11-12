@@ -94,6 +94,7 @@ LONG_TOOLS = {
     "analyze_assembly", "check_interference", "check_rebuild", "component_status",
     "set_component_state", "import_step", "measure_curves", "manage_configurations",
     "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
+    "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
 }
 
 
@@ -1356,6 +1357,159 @@ def sweep_circular(
         sketch with create_3d_path(sketch_name=...) — the sweep follows.
     Returns the sweep name, diameter and path length."""
     return _call("sweep_circular", {"diameter": diameter, "path_sketch": path_sketch, "name": name})
+
+
+# ---------------------------------------------------------------------------
+# SOLIDWORKS Routing (electrical): needs the SOLIDWORKS Routing add-in (Premium) loaded.
+# Workflow for a wire harness: add_routing_point on each connector part (CPoint at the cable
+# exit) -> import_from_to (wires from a from-to list; sets the connectors' reference designators;
+# makes a route sub-assembly with a stub per connector) -> route_path once per bundle (the path
+# between connection points; shared end points join into branches) -> wires are routed, each with
+# its cut length. routing_status reads everything back.
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def routing_status(route: str = "") -> str:
+    """Read SOLIDWORKS Routing state (read-only, does NOT change state_version).
+    Always: whether the Routing add-in is loaded, its library file locations and the from-to
+    header definitions (an EMPTY one makes every from-to import fail).
+    Active PART: its routing points (ConnectionPoint / RoutePoint features) and Routing
+    component type (2 = connector, 14 = clip, 27 = splice; route type 3 = electrical).
+    Active ASSEMBLY: route_assemblies (the route sub-assemblies, e.g. 'Harness_1-<top>-1') and,
+    with route=<one of them>, its wires (name, from/to as 'REF.pin', cut_length_mm, the route
+    segments they run through, errors such as not_routed / violates_bend_radius, wire part
+    number, colour, diameter_mm) and segments (id, length_mm, bend_radius_mm,
+    bundle_diameter_mm)."""
+    return _call("routing_status", {"route": route})
+
+
+@mcp.tool(structured_output=False)
+def add_routing_point(
+    kind: Literal["connection", "route", "none"] = "connection",
+    face_index: int = -1,
+    point: str = "",
+    name: str = "",
+    component_type: Literal["", "connector", "clip", "splice", "equipment"] = "",
+    diameter: Annotated[float, Field(ge=0)] = 0.0,
+    stub_length: Annotated[float, Field(ge=0)] = 0.0,
+    sub_type: int = 2,
+    reverse: bool = False,
+) -> str:
+    """Make the ACTIVE PART a SOLIDWORKS Routing component (local CAD copies only: it edits
+    the part; save it with save_document). Bumps state_version.
+    kind='connection': a connection point (CPoint, electrical) where the cable leaves the part:
+        face_index = the face the cable exits through (analyze_model(faces)), point = JSON
+        '[x, y, z]' in METERS, part coordinates, on that face (usually the cable exit centre).
+        The route leaves along the face normal; reverse=True flips it. stub_length (m) = the
+        straight stub every route starts with (default SOLIDWORKS'), diameter (m) = nominal
+        bundle diameter. sub_type: swElectricalConnectionPointType_e (2 = cable/wire, default).
+    kind='route': a route point (RPoint) at `point` (not needed for connectors placed in the
+        assembly before routing; may need the GUI).
+    kind='none': only set component_type.
+    component_type: 'connector' for harness plugs, 'clip' for tie mounts / clips.
+    name: names the new feature (its point sketch becomes <name>_Sketch).
+    Returns the feature created, its type, the part's routing points and component type."""
+    return _call("add_routing_point", {
+        "kind": kind, "face_index": face_index, "point": point, "name": name,
+        "component_type": component_type, "diameter": diameter, "stub_length": stub_length,
+        "sub_type": sub_type, "reverse": reverse})
+
+
+@mcp.tool(structured_output=False)
+def import_from_to(
+    from_to: str,
+    cable_library: str = "",
+    component_library: str = "",
+    references: str = "{}",
+    convert_guidelines: bool = False,
+    route_wires: bool = True,
+    use_existing_assembly: bool = True,
+    overwrite: bool = True,
+    search_sub_assemblies: bool = True,
+    press_ok: Annotated[int, Field(ge=0, le=10)] = 3,
+    route: str = "",
+    edit_route_first: bool = False,
+) -> str:
+    """Import wires from a from-to list into the ACTIVE ASSEMBLY (SOLIDWORKS Routing
+    'Start by From/To', IRouteManager.ImportFromToList). Bumps state_version.
+    from_to: the from-to .xlsx (first sheet; headers Wire, Spec, From Ref, Partno, Pin, To Ref,
+        Partno, Pin, Color). For an Altium harness make it with the altium-librairies tool
+        tools/altium_to_solidworks (fromto command) from the OutJob 'Manufacturing Data'.
+    cable_library: the cable/wire library XML whose WireName = each Spec (e.g. that tool's
+        routing-library/evt-cable.xml). Pass it explicitly.
+    component_library: optional when the connectors are already placed (use_existing_assembly).
+    references: JSON {component instance: reference designator}, set before the import
+        (IComponent2.ComponentReference), e.g. '{"P1_DTM06-6S-1": "P1"}': the list's From/To Ref
+        are matched to these. Each connector needs a connection point (add_routing_point).
+    Empty from-to header definitions are filled first (cable, core, other, ...): the import
+    refuses to run while one is empty. The PropertyManager pages the import opens are accepted
+    with up to press_ok RunCommand(PmOK). The import makes a NEW route sub-assembly
+    (Harness_<n>) with one stub per connector and a guideline per connector pair; it is returned
+    as new_route. convert_guidelines=True turns the guidelines into (straight / auto) route
+    geometry; leave it False and draw the real bundle paths with route_path instead.
+    route_wires: route the wires through the route geometry and report them (cut lengths).
+    route / edit_route_first: only for a route that is not created by this import.
+    Returns imported, new_route, the route's wires and segments (see routing_status), steps."""
+    return _call("import_from_to", {
+        "from_to": from_to, "cable_library": cable_library, "component_library": component_library,
+        "references": references, "convert_guidelines": convert_guidelines,
+        "route_wires": route_wires, "use_existing_assembly": use_existing_assembly,
+        "overwrite": overwrite, "search_sub_assemblies": search_sub_assemblies,
+        "press_ok": press_ok, "route": route, "edit_route_first": edit_route_first})
+
+
+@mcp.tool(structured_output=False)
+def route_path(
+    route: str = "",
+    points: str = "[]",
+    bend_radius: Annotated[float, Field(ge=0)] = 0.0,
+    bend_radii: str = "[]",
+    add_cpoints: str = "[]",
+    exit_route: bool = True,
+    route_wires: bool = True,
+) -> str:
+    """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one call per
+    bundle). Bumps state_version.
+    route: the route sub-assembly (routing_status route_assemblies / import_from_to new_route);
+        ignored while a route is already being edited.
+    points: JSON [[x,y,z], ...] in METERS, top-assembly coordinates (the route sub-assembly sits
+        at the identity), from one connection point to the next: start / end exactly on a
+        connector stub end (the open_ends of the result) or on another bundle's end point (a
+        breakout: shared end points join into a branch). Corners get tangent arcs of
+        bend_radius (m) or bend_radii (JSON, one per corner), as create_3d_path does.
+    add_cpoints: JSON [[component, cpoint feature], ...] connectors to add to the route first
+        (each gets its stub), e.g. '[["P2-1", "CPoint1"]]'.
+    exit_route=False keeps the route open for the next bundle; the last call exits (True), and
+        with route_wires routes the wires and returns them with cut lengths and errors
+        (violates_bend_radius = a bend under the wire's library minimum bend radius).
+    Returns the route sketch (segments, total length_mm, open_ends), drawn_length_mm, and after
+    exit the wires and segments."""
+    return _call("route_path", {
+        "route": route, "points": points, "bend_radius": bend_radius, "bend_radii": bend_radii,
+        "add_cpoints": add_cpoints, "exit_route": exit_route, "route_wires": route_wires})
+
+
+@mcp.tool(structured_output=False)
+def route_guidelines(route: str = "", exit_route: bool = True) -> str:
+    """Turn the guidelines of a SOLIDWORKS Routing route (the connector pairs a from-to import
+    still has to wire) into route geometry (IAutoRoute ShowGuidelines / SelectGuidelines /
+    ConvertGuidelinesToRoute) in the ACTIVE ASSEMBLY. Gives SOLIDWORKS' own straight / auto
+    paths, not the harness's real bundle paths (use route_path for those). Bumps state_version.
+    route: the route sub-assembly, unless a route is already being edited.
+    Returns the route sketch and the steps."""
+    return _call("route_guidelines", {"route": route, "exit_route": exit_route})
+
+
+@mcp.tool(structured_output=False)
+def start_route(component: str, cpoint: str = "", press_ok: bool = True, exit_route: bool = True) -> str:
+    """Start a NEW electrical route at a connector's connection point in the ACTIVE ASSEMBLY
+    (IRouteManager.StartRoute + RunCommand(PmOK) for the Route Properties page), without a
+    from-to list (no wires; for a cable-only model). A harness with wires starts from
+    import_from_to instead. Bumps state_version.
+    component: the connector instance; cpoint: its connection point feature (default: the
+        component itself is selected). exit_route=False stays in the route sketch for route_path.
+    Returns the steps, where SolidWorks left the edit focus and the route sub-assemblies."""
+    return _call("start_route", {"component": component, "cpoint": cpoint,
+                                 "press_ok": press_ok, "exit_route": exit_route})
 
 
 # ---------------------------------------------------------------------------

@@ -104,7 +104,7 @@ The `adapters/` layer is provider-specific and replaceable. Because the executio
 
 ## Tool List
 
-The system currently exposes **58 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
+The system currently exposes **64 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
 
 The **resources** carry the rule set and the contracts, not behaviour: `recipe://usage/index` plus one static `recipe://usage/<section>` per rule section, and `schema://feature-graph` + `schema://analysis-artifact`. The split is deliberate — a tool's description is paid on every single turn whether or not it is used, while a resource body costs only when read, so near-static reference material belongs on the resource side.
 
@@ -161,6 +161,15 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `analyze_assembly` — reads components (tree order with full transforms, incl. a flattened leaf view across nesting levels), mates (creation order, locale-proof enum types, entity anchors), or one component's face/edge lists.
 - `save_body_as_part` — extracts one body of a multibody part into its own part file (for flattened assembly STEP imports).
 - `compare_assemblies` — objective assembly diff (component set, per-component transforms to ≤1 µm, mate count + types, mass properties) with the `verified` verdict.
+
+### Routing (electrical wire harnesses)
+Needs the **SOLIDWORKS Routing** add-in (SOLIDWORKS Premium), loaded at start-up (Tools › Add-Ins). These tools drive it without clicks: the PropertyManager pages Routing opens are accepted with `RunCommand(PmOK)`. A harness is modelled as: connection points on the connector parts → wires from a from-to list → route geometry per bundle → wires routed, each with its cut length.
+- `routing_status` — read-only: add-in state, library locations, from-to header definitions; a part's routing points and component type; an assembly's route sub-assemblies, and one route's wires (from/to `REF.pin`, cut length, segments, errors such as `not_routed` / `violates_bend_radius`) and segments (length, bend radius, bundle diameter).
+- `add_routing_point` — makes the active part a Routing connector / clip: a connection point (CPoint) on the cable exit face at a point, or a route point, and the component type.
+- `import_from_to` — wires from a from-to `.xlsx` (`ImportFromToList`): sets the connectors' reference designators, fills empty from-to header definitions (an empty one makes every import fail), creates the route sub-assembly with a stub per connector, optionally converts the guidelines, routes the wires and reports them.
+- `route_path` — draws route geometry (a polyline with tangent bends, like `create_3d_path`) in a route, one call per bundle; shared end points join into branches; on exit routes the wires and returns their cut lengths.
+- `route_guidelines` — converts a route's guidelines into SOLIDWORKS' own auto paths (`ConvertGuidelinesToRoute`).
+- `start_route` — starts a route at a connection point without a from-to list (cable only, no wires).
 
 ### Analysis pipeline & IR round-trip
 These tools implement the reverse-engineering loop — *"the LLM proposes, the round-trip decides"* — that reproduces an existing part from a CAD-neutral Feature Graph IR and objectively verifies the result.
