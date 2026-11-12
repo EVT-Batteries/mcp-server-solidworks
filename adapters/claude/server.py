@@ -386,7 +386,9 @@ def check_interference(
     be checked, and `clear` (true = no interference, no clearance violation, nothing skipped).
     compact: on a large assembly, report counts instead of the long lists: not_measured_count +
     not_measured_neighbours (pairs Measure could not size, usually surface-only models) and
-    resolved_from_lightweight_count.
+    resolved_from_lightweight_count. Not compact: also `neighbours`, the instance paths checked.
+    Measure reports no distance between two route tubes (SOLIDWORKS Routing): interference
+    detection still sees an overlap; check stacked routes' spacing from their centrelines.
     ignore_same_parent: leave out interferences and clearance violations whose components all
     sit in the same sub-assembly (e.g. a harness's own bundles meeting at their split points);
     reported as ignored_same_parent."""

@@ -99,6 +99,7 @@ namespace SolidworksExecution.Services
                                 CollectNear(asm, c, boxes, margin, targetPaths, includeHidden, near, skippedLight, 0);
                     result["checked"] = new JArray(targetPaths.ToArray());
                     result["neighbours_checked"] = near.Count;
+                    if (!compact) result["neighbours"] = new JArray(near.Select(ComponentPath).ToArray());
                 }
                 else result["checked"] = "all components";
 

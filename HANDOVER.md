@@ -61,6 +61,14 @@ before the call).
 
 ### 4. Smaller things noticed
 
+- **Clearance between two route tubes.** `check_interference(clearance=...)` lists a route tube
+  of another harness as a neighbour (`compact=False` now prints the `neighbours`), but
+  `IMeasure` reports no distance between two route tube components: two bundles 0.04 mm apart
+  (from their centrelines) were not reported within 5 mm, and the pair was not listed as not
+  measured either. Interference detection does compare them. Find why Measure skips the pair
+  (virtual components? select the bodies instead of the components?) and, failing that, list
+  such pairs as not measured.
+
 - `measure_curves` on a large assembly with `include_geometry` returns well over 100 kB; with
   `as_route` available, consider omitting `per_segment` geometry unless asked.
 - `check_rebuild(recursive=True)` on a large assembly returns more than 100 kB; a `compact`
