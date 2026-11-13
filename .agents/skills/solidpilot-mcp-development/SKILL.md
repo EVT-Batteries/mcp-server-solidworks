@@ -280,12 +280,24 @@ Results are in `$r.cadState.features` (often one JSON string).
     `A-1/B-1` by walking down `GetComponents(true)` / `GetChildren()` comparing the last segment.
     Building `ComponentPath` for all ~1000 components took ~15 s per lookup.
   - **`ViewZoomTo2`** takes the zoom rectangle in VIEW coordinates (the frame of
-    `IModelView.Orientation3`, row vectors: v = p·R), not model-space box corners. Verified
-    against `ViewZoomToSelection` on the same component.
+    `IModelView.Orientation3`, row vectors: v = p·R), not model-space box corners. The scale it
+    sets is right, but the centre depends on the pan before it: after a zoom to fit of a large
+    assembly the box landed 135 px right of centre in a 1920 px view. Measure instead of trusting
+    it: `IModelView.Transform` maps model to window pixels (rotation with y down, translation in
+    px, scale in px/m: px = (p·R)·s + t) and `GetClientRect(GetViewHWndx64())` gives the
+    graphics area (= the `SaveBMP` size); shift the rectangle by the pixel error / s and zoom
+    again (one pass converges). `ViewZoomToSelection` frames nested components poorly too.
   - **Isolating components**: setting `IComponent2.Visible = 0` on leaf components of lightweight
     sub-assemblies did not show in the capture. Setting `Visible = 1` afterwards also un-hid parts
     that the sub-assemblies' display states had hidden. Use `IAssemblyDoc.Isolate()` on the
-    selection (`SetIsolateVisibility(0)` = hide the rest) and `ExitIsolate()`.
+    selection (`SetIsolateVisibility(0)` = hide the rest) and `ExitIsolate()`. Isolate hides
+    components, not sketches: the 3D sketches of route sub-assemblies stay as stray lines. Switch
+    `SetUserPreferenceToggle(196 swDisplaySketches / 195 swDisplayCurves, false)` for the capture
+    and restore them.
+  - **COM from a script**: PowerShell 7 has no `Marshal.GetActiveObject`, and late-bound calls on
+    SolidWorks fail (`TYPE_E_ELEMENTNOTFOUND`). For a quick API experiment, compile a small C#
+    class with `Add-Type` in Windows PowerShell 5.1 (`powershell.exe -STA`), loading
+    `SolidWorks.Interop.sldworks.dll` from the SolidWorks install first.
   - **Closing a referenced document**: `CloseDoc` on a part that an open assembly references
     keeps the part in memory with its unsaved changes; reopening it shows them, and saving the
     assembly would write them. To discard test changes, close the assembly without saving too.

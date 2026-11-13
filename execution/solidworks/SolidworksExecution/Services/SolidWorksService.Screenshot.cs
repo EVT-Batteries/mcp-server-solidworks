@@ -58,6 +58,8 @@ namespace SolidworksExecution.Services
                 if (modelDoc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+                bool wasDirty = true;
+                try { wasDirty = modelDoc.GetSaveFlag(); } catch { }
 
                 if (!string.Equals(view, "current", StringComparison.OrdinalIgnoreCase))
                 {
@@ -111,19 +113,23 @@ namespace SolidworksExecution.Services
                     if (u == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "NO_GEOMETRY", "The focus components have no bounding box (suppressed or lightweight without graphics).");
-                    if (zb == null)
-                    {
-                        // SolidWorks' own zoom to the selected components.
-                        modelDoc.ViewZoomtofit2();
-                        modelDoc.ClearSelection2(true);
-                        foreach (var c in comps) try { c.Select4(true, null, false); } catch { }
-                        modelDoc.ViewZoomToSelection();
-                        modelDoc.ClearSelection2(true);
-                        focusZoomed = true;
-                    }
                     info["focus_box_mm"] = new JArray(u.Select(v => Math.Round(v * 1000, 1)));
                     if (isolate && !IsolateComponents(asmF, comps)) info["isolate_failed"] = true;
+                    if (zb == null)
+                    {
+                        // Zoom on the components' world box, projected into the view (after the
+                        // isolate, which can re-frame the view). ViewZoomToSelection framed nested
+                        // components poorly: off-centre, part of them outside the image.
+                        modelDoc.ViewZoomtofit2();
+                        ZoomToModelBox(modelDoc, u, margin);
+                        focusZoomed = true;
+                    }
                 }
+                // Isolate hides components, not sketches: the 3D sketches of route sub-assemblies
+                // (and other sketches / curves shown in the assembly) stayed in the image as stray
+                // lines. Hide sketches and curves for the capture; restored in finally.
+                bool hideSketches = p?.Value<bool?>("hide_sketches") ?? isolate;
+                if (hideSketches) HideSketchesForCapture(modelDoc);
                 if (focusZoomed) { }
                 else if (zb != null)
                 {
@@ -159,6 +165,12 @@ namespace SolidworksExecution.Services
                     info["isolated"] = true;
                     RestoreHidden(modelDoc);
                 }
+                if (_hiddenToggles != null)
+                {
+                    info["sketches_hidden"] = true;
+                    RestoreSketchDisplay();
+                }
+                try { if (!wasDirty && modelDoc.GetSaveFlag()) info["marked_modified"] = true; } catch { }
 
                 return new ExecutionResponse
                 {
@@ -192,10 +204,46 @@ namespace SolidworksExecution.Services
             {
                 if (tmpBmp != null) try { File.Delete(tmpBmp); } catch { }
                 if (_isolated != null) try { RestoreHidden(_solidWorks.IActiveDoc2 as IModelDoc2); } catch { }
+                if (_hiddenToggles != null) try { RestoreSketchDisplay(); } catch { }
             }
         }
 
         private IAssemblyDoc _isolated;
+
+        // View > Hide/Show toggles switched off for a capture, with their previous values
+        // (swUserPreferenceToggle_e: 196 swDisplaySketches, 195 swDisplayCurves).
+        private static readonly int[] SketchDisplayToggles = { 196, 195 };
+        private IModelDoc2 _hiddenTogglesDoc;
+        private Dictionary<int, bool> _hiddenToggles;
+
+        private void HideSketchesForCapture(IModelDoc2 doc)
+        {
+            var prev = new Dictionary<int, bool>();
+            foreach (int t in SketchDisplayToggles)
+            {
+                try
+                {
+                    bool on = doc.GetUserPreferenceToggle(t);
+                    prev[t] = on;
+                    if (on) doc.SetUserPreferenceToggle(t, false);
+                }
+                catch { }
+            }
+            _hiddenTogglesDoc = doc;
+            _hiddenToggles = prev;
+        }
+
+        private void RestoreSketchDisplay()
+        {
+            var doc = _hiddenTogglesDoc;
+            var prev = _hiddenToggles;
+            _hiddenTogglesDoc = null;
+            _hiddenToggles = null;
+            if (doc == null || prev == null) return;
+            foreach (var kv in prev)
+                if (kv.Value) try { doc.SetUserPreferenceToggle(kv.Key, true); } catch { }
+            try { doc.GraphicsRedraw2(); } catch { }
+        }
 
         // SolidWorks' own Isolate command on the selected components (IAssemblyDoc.Isolate, a
         // temporary view mode left with ExitIsolate). Setting IComponent2.Visible per component did
@@ -248,7 +296,68 @@ namespace SolidworksExecution.Services
                 minY = Math.Min(minY, vy); maxY = Math.Max(maxY, vy);
             }
             double zc = sumZ / 8, mx = (maxX - minX) * margin, my = (maxY - minY) * margin;
-            doc.ViewZoomTo2(minX - mx, minY - my, zc, maxX + mx, maxY + my, zc);
+            double x1 = minX - mx, y1 = minY - my, x2 = maxX + mx, y2 = maxY + my;
+            doc.ViewZoomTo2(x1, y1, zc, x2, y2, zc);
+
+            // ViewZoomTo2 sets the scale right but, depending on the pan before it, not the centre
+            // (2026-11-13: the box landed 135 px right of the centre of a 1920 px view after a zoom
+            // to fit of a large assembly). Measure where the box lands (IModelView.Transform: model
+            // to window pixels) and shift the rectangle by the error until it is centred.
+            int w, h;
+            if (!ViewClientSize(view, out w, out h)) return;
+            for (int pass = 0; pass < 3; pass++)
+            {
+                var px = LandedPixelBox(view, b);
+                if (px == null) return;
+                double s = px[4];
+                if (s <= 0) return;
+                double ex = (px[0] + px[2]) / 2 - w / 2.0, ey = (px[1] + px[3]) / 2 - h / 2.0;
+                if (Math.Abs(ex) < 2 && Math.Abs(ey) < 2) return;
+                // A rectangle moved by +d (view m) moves the model by -d*s px in x and +d*s px in y
+                // (window y points down).
+                double dx = ex / s, dy = -ey / s;
+                x1 += dx; x2 += dx; y1 += dy; y2 += dy;
+                doc.ViewZoomTo2(x1, y1, zc, x2, y2, zc);
+            }
+        }
+
+        // Pixel box [xmin, ymin, xmax, ymax, scale] of a model box in the view window
+        // (IModelView.Transform: rotation, translation in pixels, pixels per meter; row vectors).
+        private static double[] LandedPixelBox(IModelView view, double[] b)
+        {
+            var x = (view?.Transform as MathTransform)?.ArrayData as double[];
+            if (x == null || x.Length < 13) return null;
+            double s = x[12];
+            double a = double.MaxValue, c = double.MaxValue, d = double.MinValue, e = double.MinValue;
+            for (int m = 0; m < 8; m++)
+            {
+                double px = (m & 1) == 0 ? b[0] : b[3], py = (m & 2) == 0 ? b[1] : b[4], pz = (m & 4) == 0 ? b[2] : b[5];
+                double u = (px * x[0] + py * x[3] + pz * x[6]) * s + x[9];
+                double v = (px * x[1] + py * x[4] + pz * x[7]) * s + x[10];
+                a = Math.Min(a, u); d = Math.Max(d, u); c = Math.Min(c, v); e = Math.Max(e, v);
+            }
+            return new[] { a, c, d, e, s };
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ClientRect { public int Left, Top, Right, Bottom; }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetClientRect(IntPtr hWnd, out ClientRect rect);
+
+        // Size in pixels of the view's graphics area (= the SaveBMP image at width / height 0).
+        private static bool ViewClientSize(IModelView view, out int w, out int h)
+        {
+            w = h = 0;
+            try
+            {
+                long hwnd = view.GetViewHWndx64();
+                if (hwnd == 0 || !GetClientRect(new IntPtr(hwnd), out var r)) return false;
+                w = r.Right - r.Left;
+                h = r.Bottom - r.Top;
+                return w > 0 && h > 0;
+            }
+            catch { return false; }
         }
 
         // The screenshot, with the caption's lines (split on '\n') in a white band below it.

@@ -553,10 +553,11 @@
     "width": "integer (optional, default 0 = window width — image width in pixels)",
     "height": "integer (optional, default 0 = window height — image height in pixels)",
     "caption": "string (optional — text drawn in a white band under the image, lines split on '\\n', first line bold)",
-    "zoom_box": "number[6] (optional — [x1,y1,z1,x2,y2,z2] in meters, model coordinates: the 8 corners are projected into the view frame (IModelView.Orientation3) and that rectangle, in view coordinates, is passed to IModelDoc2.ViewZoomTo2)",
-    "focus": "string or array (optional - JSON list of component names / instance paths: ViewZoomToSelection on them)",
+    "zoom_box": "number[6] (optional - [x1,y1,z1,x2,y2,z2] in meters, model coordinates: the 8 corners are projected into the view frame (IModelView.Orientation3) and passed to IModelDoc2.ViewZoomTo2; where the box lands (IModelView.Transform) is then measured and the rectangle shifted until it is centred)",
+    "focus": "string or array (optional - JSON list of component names / instance paths: zoom on their world bounding box, as zoom_box)",
     "isolate": "boolean (optional, default false - IAssemblyDoc.Isolate on the focus components for the capture, ExitIsolate afterwards)",
-    "margin": "number (optional, default 0.1 - extra frame around zoom_box, fraction of its size)"
+    "margin": "number (optional, default 0.1 - extra frame around zoom_box / the focus box, fraction of its size)",
+    "hide_sketches": "boolean (optional, default = isolate - swDisplaySketches / swDisplayCurves off for the capture, restored afterwards)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {file_path, width, height, view}."

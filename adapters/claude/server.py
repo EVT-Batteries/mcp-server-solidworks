@@ -1783,22 +1783,29 @@ def screenshot(
     focus: str = "[]",
     isolate: bool = False,
     margin: Annotated[float, Field(ge=0, le=2)] = 0.1,
+    hide_sketches: bool | None = None,
 ) -> str:
     """Save the active document's graphics view as a PNG image (does NOT change state).
     Captures what the SolidWorks window shows (IModelDoc2.SaveBMP); the document file itself is
     never written. Only the on-screen view changes: `view` switches to a standard orientation
-    first ('current' keeps the user's view), and zoom_to_fit fits the model in the window.
+    first ('current' keeps the user's view; standard views are SolidWorks' Y-up ones, so a Z-up
+    model is seen from above with 'front'), and zoom_to_fit fits the model in the window.
     file_path: full output path ending in .png (folders are created).
     width / height: image size in pixels; 0 = the window's size.
     caption: optional text drawn in a white band under the image, one line per '\\n'; the first
         line is bold (e.g. the part name, then its measurements from measure_curves).
     zoom_box: JSON '[x1, y1, z1, x2, y2, z2]' in METERS, model coordinates: zoom on that 3D box
         (projected into the chosen view, plus `margin` x its size on each side) instead of fitting
-        the whole model, e.g. to look at one connector area of a large assembly.
-    focus: JSON list of component names or instance paths (active assembly): zoom on them
-        (SolidWorks' zoom to selection; margin does not apply). isolate=True shows only them for the
-        capture (SolidWorks' Isolate, left with ExitIsolate afterwards; the display state is not
-        changed). Returns focus_box_mm (their world bounding box).
+        the whole model, e.g. to look at one connector area of a large assembly. The view is
+        centred on the box (where it lands is measured and corrected).
+    focus: JSON list of component names or instance paths (active assembly): zoom on their world
+        bounding box (as zoom_box, with margin; returned as focus_box_mm). isolate=True shows only
+        them for the capture (SolidWorks' Isolate, left with ExitIsolate afterwards; the display
+        state is not changed).
+    hide_sketches: hide sketches and curves for the capture (View > Hide/Show, restored after);
+        default = isolate (Isolate hides components only: route sketches of other route
+        sub-assemblies stayed in the image). marked_modified=true in the result if the capture
+        left the document marked modified.
     The document's window must be visible: activate_document it first."""
     params: dict = {"file_path": file_path, "view": view, "zoom_to_fit": zoom_to_fit,
                     "width": width, "height": height, "caption": caption}
@@ -1808,6 +1815,8 @@ def screenshot(
         params["focus"] = focus
         params["isolate"] = isolate
     params["margin"] = margin
+    if hide_sketches is not None:
+        params["hide_sketches"] = hide_sketches
     return _call("screenshot", params)
 
 
