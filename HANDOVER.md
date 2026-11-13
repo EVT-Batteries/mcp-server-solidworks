@@ -59,6 +59,98 @@ close, repeated. Proposal: `screenshot_files(files: [{path, caption, out}], view
 file, captures it and closes it again without saving (never closing documents the user had open
 before the call).
 
+### 5. SOLIDWORKS Routing workflow: time and token savers (open, 2026-11-13)
+
+Found while routing two equal-length harnesses in a large assembly (about 1000 components) with
+`import_from_to` + `route_path`. Ranked by the time they would have saved. Start with a, c, d and
+e. Each needs a rebuild of the execution server and an MCP restart (skill
+`solidpilot-mcp-development`).
+
+**a. Check a path without drawing a route.** Each candidate path cost several minutes:
+re-import the from-to, `route_path`, a rebuild of the top assembly, `check_interference` on the
+tube. One route took five candidates to clear the parts around it.
+
+Proposal: a read-only `check_path_clearance(points, bend_radii, diameter, margin)`. It builds a
+temporary swept tube on the filleted polyline (in a scratch part inserted at the origin, or as a
+temporary body), runs the interference check against the active assembly, deletes the tube and
+returns:
+- each hit: component, volume, box;
+- the **leg or corner index** of the path it falls on, so the caller moves the right point
+  instead of matching boxes to the path by hand.
+
+**b. Preview lengths and check geometry in `route_path`.** The caller kept its own model of
+`route_path`'s geometry (per corner t = r·tan(θ/2), arc r·θ, plus the stubs; it matched
+SOLIDWORKS cut lengths to 0.01 mm) and bisection solvers to equalize wires. Proposal:
+- `dry_run=True` returns, without drawing:
+  - the predicted cut length of every wire of the route, with the already-drawn segments and the
+    stubs;
+  - the slack of each leg: its length minus the tangents at both ends; negative means the radii
+    do not fit.
+- Fail with a clear error on the two shapes that broke routes:
+  - a corner of a few degrees with a radius, which split the route into disconnected segments
+    and left wires unrouted;
+  - a branch start inside a corner fillet of the existing route: it does not snap ("start is a
+    new route point (nearest existing 3.9 mm)"), and the branch's wires stay unrouted.
+- Optional `target`: {wire group, length}, solved over one named free parameter (a service-loop
+  radius, a node station along a leg). See §1 for the loop shape.
+
+**c. Do not dirty every reference.** After `check_rebuild(rebuild=True)` (ForceRebuild3) on the
+top assembly, the next `save_document` rewrote 136 referenced files (214 MB) with no intended
+change. Undoing it meant closing without saving, restoring the files from git and reopening.
+Proposal:
+- `check_rebuild` rebuilds only what is out of date (EditRebuild3) unless `force=True`.
+- `save_document(documents=[...])` saves only the named open documents, and
+  `save_document(references="none")` saves only the active one.
+- The result reports `dirty_references` as a count, with names on request.
+
+**d. Bound slow calls.** `component_status` with named components reads their mates by default.
+On the large assembly it held SolidWorks for more than 25 minutes, and nothing could cancel it
+(the busy gate only rejects later calls). Proposal:
+- `include_mates` defaults to false;
+- the mate scan caches the mate list per assembly (TODO "Next improvements" 8);
+- a `time_budget_s` (default 60) on every whole-assembly loop: stop and return partial results
+  with `truncated: true`.
+
+**e. Compact default outputs.** Proposal: counts by default for the long lists below, the full
+lists behind `verbose=True` (as `check_interference(compact=True)` already does):
+
+| Call | Default output today |
+|---|---|
+| `save_document` | `saved_references`: about 150 paths |
+| `check_rebuild` | 240 kB of `components_not_loaded`: every lightweight component |
+| `add_routing_point`, `routing_status` | the full routing-library `file_locations` and `from_to_headers` block on every call |
+
+**f. World bounding boxes in `component_status`.** Finding free space meant opening each nearby
+part, reading `analyze_model(geometry)` `box_m` and transforming it by hand (7 parts, 3 calls
+each). `Interference.cs` already has `ComponentBox` (`IComponent2.GetBox`). Proposal:
+`boxes=True` returns each component's world box (and per-body boxes for multi-body parts), and
+`check_interference` returns its neighbours' boxes.
+
+**g. Replace a route in one call.** Each redraw was:
+1. `edit_feature(delete)` on the old route;
+2. `import_from_to`;
+3. `route_path` calls;
+4. `set_component_state` in every configuration, to show the route only in its own;
+5. a manual delete of the old route's `Harness_<n>` files (`.SLDASM`, `-fromToList.xml`,
+   `-segmentList.xml`); 15 files were left over.
+
+Proposal: `import_from_to(replaces="<old route>", configuration="<name>")` deletes the old route
+feature and its files, and suppresses the new route in the other configurations of the assembly.
+
+**h. Connection point at the real wire exit.** One plug's connection point sat on an internal
+face, so every route ended 8.7 mm inside the plug body (found only by a clash check). Proposal:
+`add_routing_point(direction=[x,y,z])` without `face_index` picks the outermost planar face
+whose normal is that direction (from the bodies' extent along it) and puts the point at its
+centre. The result reports the body extent beyond the point, which should be 0.
+
+**i. Screenshots of named components.** `screenshot(zoom_box)` framed the wrong region in a large
+assembly (`ViewZoomtofit2` then `ViewZoomTo2` with model-coordinate corners). Check how
+`ViewZoomTo2` maps its corners (it may take view coordinates). Proposal:
+- `screenshot(focus=[components])` zooms to the union of their world boxes;
+- `isolate=True` hides the rest and restores it afterwards.
+
+Until then, pictures of a harness come from opening its assembly on its own.
+
 ### 4. Smaller things noticed
 
 - **Clearance of multi-body components (fixed).** `IMeasure` on two selected components looked
