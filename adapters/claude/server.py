@@ -1670,6 +1670,7 @@ def screenshot(
     width: Annotated[int, Field(ge=0, le=8000)] = 0,
     height: Annotated[int, Field(ge=0, le=8000)] = 0,
     caption: str = "",
+    zoom_box: str = "",
 ) -> str:
     """Save the active document's graphics view as a PNG image (does NOT change state).
     Captures what the SolidWorks window shows (IModelDoc2.SaveBMP); the document file itself is
@@ -1679,10 +1680,15 @@ def screenshot(
     width / height: image size in pixels; 0 = the window's size.
     caption: optional text drawn in a white band under the image, one line per '\\n'; the first
         line is bold (e.g. the part name, then its measurements from measure_curves).
+    zoom_box: JSON '[x1, y1, z1, x2, y2, z2]' in METERS, model coordinates: zoom on that region
+        (IModelDoc2.ViewZoomTo2, after the view orientation) instead of fitting the whole model,
+        e.g. to look at one connector area of a large assembly.
     The document's window must be visible: activate_document it first."""
-    return _call("screenshot", {"file_path": file_path, "view": view,
-                                "zoom_to_fit": zoom_to_fit, "width": width,
-                                "height": height, "caption": caption})
+    params: dict = {"file_path": file_path, "view": view, "zoom_to_fit": zoom_to_fit,
+                    "width": width, "height": height, "caption": caption}
+    if zoom_box:
+        params["zoom_box"] = json.loads(zoom_box)
+    return _call("screenshot", params)
 
 
 # ---------------------------------------------------------------------------

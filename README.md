@@ -145,7 +145,7 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `analyze_model` — `geometry`, `mass_properties`, `bodies` (per-body fingerprints for multibody parts), `features` (a compact feature-level recipe), `edges`, `faces`, `sketch` (one sketch's exact segments on demand), and `feature_map` (per-feature consumed/created topology — the source of the reference-resolver anchors) modes.
 - `get_selection` — reads the geometry the user selected in the SolidWorks GUI and maps it to the analyze index.
 - `measure_curves` — true 3D lengths of sweep paths and 3D sketches (lines, arcs, splines), in a part or across every component of an assembly (e.g. cable and wire lengths); `include_geometry` adds each segment's 3D points (assembly coordinates in an assembly).
-- `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit and a caption band); the document file is never written.
+- `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit or to a region of the model, and a caption band); the document file is never written.
 - `check_rebuild` — SolidWorks' What's Wrong for the active document and every loaded sub-assembly and part: rebuild errors and warnings, with the components each broken mate references.
 - `check_interference` — interference detection for named components against the parts near them (or the whole assembly): overlapping pairs with their volume and location, and with `clearance`, every neighbour closer than a distance.
 - `component_status` — status of an assembly's components (suppressed / lightweight / resolved, hidden, fixed, missing file, suppressed parent), nested ones included, with each component's mates and their rebuild errors.

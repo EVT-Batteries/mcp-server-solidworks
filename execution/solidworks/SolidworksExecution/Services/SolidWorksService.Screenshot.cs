@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -66,7 +67,15 @@ namespace SolidworksExecution.Services
                             $"view '{view}' is not supported. Supported: current, {string.Join(", ", StandardViews.Keys)}.");
                     modelDoc.ShowNamedView2("", viewId);
                 }
-                if (fit) modelDoc.ViewZoomtofit2();
+                // zoom_box: [x1,y1,z1,x2,y2,z2] in meters, model (assembly) coordinates: zoom on that
+                // region instead of fitting the whole model (IModelDoc2.ViewZoomTo2).
+                double[] zb = (p?["zoom_box"] as JArray)?.Select(t => (double)t).ToArray();
+                if (zb != null && zb.Length == 6)
+                {
+                    modelDoc.ViewZoomtofit2();
+                    modelDoc.ViewZoomTo2(zb[0], zb[1], zb[2], zb[3], zb[4], zb[5]);
+                }
+                else if (fit) modelDoc.ViewZoomtofit2();
                 modelDoc.GraphicsRedraw2();
 
                 string dir = Path.GetDirectoryName(filePath);
