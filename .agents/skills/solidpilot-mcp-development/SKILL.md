@@ -272,6 +272,40 @@ Results are in `$r.cadState.features` (often one JSON string).
   `Environment` is ambiguous with `SolidWorks.Interop.sldworks.Environment`: write
   `System.Environment`.
 
+- **Large assemblies, view and side effects (2026-11-13)**:
+  - **Rebuilds**: `ForceRebuild3(false)` on a top assembly rebuilds every level and marks every
+    loaded reference modified, so the next save rewrote ~140 unchanged files (200 MB).
+    `EditRebuild3` rebuilds only what is out of date: use it unless asked to force.
+  - **Instance paths**: `IComponent2.Name2` of a nested component carries its parent path. Find
+    `A-1/B-1` by walking down `GetComponents(true)` / `GetChildren()` comparing the last segment.
+    Building `ComponentPath` for all ~1000 components took ~15 s per lookup.
+  - **`ViewZoomTo2`** takes the zoom rectangle in VIEW coordinates (the frame of
+    `IModelView.Orientation3`, row vectors: v = p·R), not model-space box corners. Verified
+    against `ViewZoomToSelection` on the same component.
+  - **Isolating components**: setting `IComponent2.Visible = 0` on leaf components of lightweight
+    sub-assemblies did not show in the capture. Setting `Visible = 1` afterwards also un-hid parts
+    that the sub-assemblies' display states had hidden. Use `IAssemblyDoc.Isolate()` on the
+    selection (`SetIsolateVisibility(0)` = hide the rest) and `ExitIsolate()`.
+  - **Closing a referenced document**: `CloseDoc` on a part that an open assembly references
+    keeps the part in memory with its unsaved changes; reopening it shows them, and saving the
+    assembly would write them. To discard test changes, close the assembly without saving too.
+  - **Leaving route edit** (`ExitRoute`) makes SOLIDWORKS rewrite the route's
+    `-segmentList.xml` (renumbered jog-point IDs) on disk at once. For read-only work, read the
+    route sketch through the route component instead: walk its features (and sub-features) for
+    the `3DProfileFeature` and take `GetSpecificFeature2()` as `ISketch`. Its coordinates are top
+    coordinates, since the route sits at the identity.
+  - **Temporary geometry in an assembly** (`check_path_clearance`):
+    1. `NewDocument(part template)`, build, `SaveAs3` to `%TEMP%`.
+    2. Activate the assembly, `AddComponent5`, then set `Transform2` to the identity (x/y/z only
+       centre the bounding box).
+    3. Check, then `Select4` + `Extension.DeleteSelection2(0)` and `CloseDoc`.
+
+    The file stays locked until SOLIDWORKS releases the model (delete leftovers on the next
+    call), and the assembly stays marked modified.
+  - **Exit faces**: terminal tips and ribs often stand a fraction of a mm proud of a connector's
+    rear face. Pick the largest planar face within ~1 mm of the outermost one along the exit
+    direction, not the outermost face.
+
 ## Committing
 
 A change is committed as one unit: the source, contract, adapter, README and the rebuilt

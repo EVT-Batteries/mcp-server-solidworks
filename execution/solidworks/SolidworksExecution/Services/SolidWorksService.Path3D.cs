@@ -465,6 +465,7 @@ namespace SolidworksExecution.Services
             }
             for (int k = 0; k < n - 1; k++) expected += Dist(pts[k], pts[k + 1]);
 
+            if (sm == null) return expected;   // geometry only (dry run)
             double[] cur = pts[0];
             for (int i = 1; i < n; i++)
             {
@@ -484,6 +485,53 @@ namespace SolidworksExecution.Services
                 else cur = pts[i];
             }
             return expected;
+        }
+
+        // Per leg of a filleted polyline: length, tangent lengths taken by the bends at its two ends
+        // and the straight rest (slack < 0: the radii do not fit and get scaled down); per corner:
+        // deflection angle, radius, tangent length. Same construction as DrawFilletedPolyline.
+        private static JObject PolylineGeometry(List<double[]> pts, double[] radii)
+        {
+            int n = pts.Count;
+            var t = new double[n];
+            var corners = new JArray();
+            for (int i = 1; i < n - 1; i++)
+            {
+                double[] u = Unit(Sub(pts[i - 1], pts[i]));
+                double[] v = Unit(Sub(pts[i + 1], pts[i]));
+                double theta = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(u, v))));
+                double defl = (Math.PI - theta) * 180.0 / Math.PI;
+                double r = radii[i - 1];
+                if (r > 0 && Math.PI - theta >= 1e-6) t[i] = r / Math.Tan(theta / 2.0);
+                corners.Add(new JObject
+                {
+                    ["corner"] = i,
+                    ["deflection_deg"] = Math.Round(defl, 2),
+                    ["radius_mm"] = Math.Round(r * 1000, 3),
+                    ["tangent_mm"] = Math.Round(t[i] * 1000, 3),
+                });
+            }
+            var legs = new JArray();
+            double minSlack = double.MaxValue;
+            for (int k = 0; k < n - 1; k++)
+            {
+                double L = Dist(pts[k], pts[k + 1]);
+                double slack = L - t[k] - t[k + 1];
+                minSlack = Math.Min(minSlack, slack);
+                legs.Add(new JObject
+                {
+                    ["leg"] = k,
+                    ["length_mm"] = Math.Round(L * 1000, 3),
+                    ["straight_mm"] = Math.Round(slack * 1000, 3),
+                });
+            }
+            return new JObject
+            {
+                ["length_mm"] = Math.Round(DrawFilletedPolyline(null, pts, radii, new JArray()) * 1000, 3),
+                ["min_straight_mm"] = Math.Round(minSlack * 1000, 3),
+                ["corners"] = corners,
+                ["legs"] = legs,
+            };
         }
 
         private static double[] Sub(double[] a, double[] b) => new[] { a[0] - b[0], a[1] - b[1], a[2] - b[2] };

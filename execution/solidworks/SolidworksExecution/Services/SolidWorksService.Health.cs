@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -57,6 +58,11 @@ namespace SolidworksExecution.Services
                 bool recursive = p?.Value<bool?>("recursive") ?? true;
                 bool includeWarnings = p?.Value<bool?>("include_warnings") ?? true;
                 bool resolveLightweight = p?.Value<bool?>("resolve_lightweight") ?? false;
+                // force: ForceRebuild3 on every level, which marks every loaded reference modified
+                // (the next save rewrites them all, with no change). Default: EditRebuild3, which
+                // rebuilds only what is out of date.
+                bool force = p?.Value<bool?>("force") ?? false;
+                bool verbose = p?.Value<bool?>("verbose") ?? false;
 
                 var top = _solidWorks.IActiveDoc2 as IModelDoc2;
                 if (top == null)
@@ -66,7 +72,11 @@ namespace SolidworksExecution.Services
                 // Lightweight components have no loaded model: their features cannot be checked.
                 int resolvedLight = resolveLightweight && top is IAssemblyDoc la ? ResolveAllLightweightComponents(la) : 0;
 
-                if (rebuild) top.ForceRebuild3(false);
+                if (rebuild)
+                {
+                    if (force) top.ForceRebuild3(false);
+                    else top.EditRebuild3();
+                }
 
                 // The documents to inspect: the active one, then every distinct loaded component document.
                 var docs = new List<KeyValuePair<IModelDoc2, string>> { new KeyValuePair<IModelDoc2, string>(top, "") };
@@ -123,12 +133,27 @@ namespace SolidworksExecution.Services
                 };
                 if (notLoaded.Count > 0)
                 {
-                    result["components_not_loaded"] = notLoaded;
-                    int light = 0;
-                    foreach (var nl in notLoaded) if ((string)nl["reason"] == "lightweight") light++;
+                    // Counts per reason; the list itself (one entry per lightweight component, 240 kB
+                    // on a 1000-component assembly) only with verbose, except missing files.
+                    var byReason = new JObject();
+                    foreach (var nl in notLoaded)
+                    {
+                        string r = (string)nl["reason"];
+                        byReason[r] = (byReason.Value<int?>(r) ?? 0) + 1;
+                    }
+                    result["components_not_loaded"] = byReason;
+                    if (verbose) result["components_not_loaded_list"] = notLoaded;
+                    else
+                    {
+                        var missing = new JArray(notLoaded.Where(nl => (string)nl["reason"] != "lightweight").Take(50));
+                        if (missing.Count > 0) result["components_not_loaded_list"] = missing;
+                    }
+                    int light = byReason.Value<int?>("lightweight") ?? 0;
                     if (light > 0)
-                        result["hint"] = light + " lightweight component(s) were not checked: pass resolve_lightweight=true to load and check them.";
+                        result["hint"] = light + " lightweight component(s) were not checked: pass resolve_lightweight=true to load and check them"
+                            + (verbose ? "." : " (verbose=true lists them).");
                 }
+                result["rebuild"] = !rebuild ? "none" : force ? "forced (all levels; every loaded reference is now modified)" : "out-of-date features only";
                 if (resolvedLight > 0) result["lightweight_resolved"] = resolvedLight;
 
                 return new ExecutionResponse

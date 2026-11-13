@@ -123,6 +123,13 @@ namespace SolidworksExecution.Services
             catch { return null; }
         }
 
+        private static string LastSegment(string n)
+        {
+            if (string.IsNullOrEmpty(n)) return "";
+            int s = n.LastIndexOf('/');
+            return s >= 0 ? n.Substring(s + 1) : n;
+        }
+
         private IComponent2 FindComponentByName(IAssemblyDoc asm, string name)
         {
             object[] comps = asm.GetComponents(true) as object[];
@@ -137,6 +144,24 @@ namespace SolidworksExecution.Services
             }
             // A component inside a sub-assembly, by its instance path from this assembly
             // ("Sub-1/Part-1", as analyze_assembly(components_flat) and check_rebuild name it).
+            // Walk down the tree one segment at a time first: building the path of every one of
+            // ~1000 components (the loop below) took ~15 s per name on a large assembly.
+            if (name != null && name.Contains("/") && comps != null)
+            {
+                var segs = name.Split('/');
+                IComponent2 cur = null;
+                foreach (var c in comps)
+                    if (c is IComponent2 top && string.Equals(LastSegment(top.Name2), segs[0], StringComparison.OrdinalIgnoreCase)) { cur = top; break; }
+                for (int i = 1; cur != null && i < segs.Length; i++)
+                {
+                    IComponent2 next = null;
+                    if (cur.GetChildren() is object[] kids)
+                        foreach (var k in kids)
+                            if (k is IComponent2 kc && string.Equals(LastSegment(kc.Name2), segs[i], StringComparison.OrdinalIgnoreCase)) { next = kc; break; }
+                    cur = next;
+                }
+                if (cur != null) return cur;
+            }
             if (name != null && name.Contains("/") && asm.GetComponents(false) is object[] all)
             {
                 foreach (var c in all)

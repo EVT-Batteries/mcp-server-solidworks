@@ -98,6 +98,7 @@
     <Compile Include="Program.cs" />
     <Compile Include="Services\SolidWorksService.cs" />
     <Compile Include="Services\SolidWorksService.Sketch.cs" />
+    <Compile Include="Services\SolidWorksService.PathClearance.cs" />
     <Compile Include="Services\SolidWorksService.Features.cs" />
     <Compile Include="Services\SolidWorksService.SheetMetal.cs" />
     <Compile Include="Services\SolidWorksService.Drawing.cs" />

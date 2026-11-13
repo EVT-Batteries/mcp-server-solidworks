@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -48,7 +49,10 @@ namespace SolidworksExecution.Services
             }
         }
 
-        private JObject RoutingAddinInfo()
+        // verbose: every routing file location and the from-to header definitions; otherwise only
+        // whether the add-in is loaded and the cable / component libraries (the rest repeated the
+        // same ~1 kB block on every routing call).
+        private JObject RoutingAddinInfo(bool verbose)
         {
             var o = new JObject();
             object addin = null;
@@ -68,6 +72,12 @@ namespace SolidworksExecution.Services
                     {
                         try { loc[names[i]] = rs.GetRoutingUserPreferenceStringValue(i, false) ?? ""; }
                         catch { }
+                    }
+                    if (!verbose)
+                    {
+                        o["cable_library"] = loc["cable_library"];
+                        o["component_library"] = loc["component_library"];
+                        return o;
                     }
                     o["file_locations"] = loc;
                     try
@@ -141,7 +151,7 @@ namespace SolidworksExecution.Services
                 string routeName = p?.Value<string>("route") ?? "";
 
                 var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
-                var result = new JObject { ["routing"] = RoutingAddinInfo() };
+                var result = new JObject { ["routing"] = RoutingAddinInfo(p?.Value<bool?>("verbose") ?? false) };
                 if (doc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_ACTIVE_DOCUMENT", "routing_status needs an open part or assembly.");
@@ -353,7 +363,7 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "INVALID_PARAMETER", "component_type must be one of: " + string.Join(", ", RoutingComponentTypes.Keys));
 
-                var result = new JObject { ["routing"] = RoutingAddinInfo() };
+                var result = new JObject { ["routing"] = RoutingAddinInfo(p?.Value<bool?>("verbose") ?? false) };
                 var warnings = new JArray();
 
                 if (kind != "none")
@@ -365,12 +375,37 @@ namespace SolidworksExecution.Services
                         if (pa.Count == 3) pts.Add(new[] { (double)pa[0], (double)pa[1], (double)pa[2] });
                     }
                     catch { }
+                    // direction (instead of face_index): the cable exit is the outermost planar face
+                    // whose outward normal is this direction; the point goes onto that face (projected
+                    // along the direction, or the face centre when no point is given). A point chosen
+                    // by hand once sat on an internal face, 8.7 mm inside the plug body.
+                    double[] exitDir = null;
+                    try
+                    {
+                        var da = JArray.Parse(p?.Value<string>("direction") ?? "");
+                        if (da.Count == 3) exitDir = Unit(new[] { (double)da[0], (double)da[1], (double)da[2] });
+                    }
+                    catch { }
+                    if (kind == "connection" && faceIndex < 0 && exitDir != null)
+                    {
+                        var exit = FindExitFace(doc, exitDir, pts.Count == 1 ? pts[0] : null, p?.Value<double?>("exit_depth") ?? 0.001);
+                        if (exit == null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "FACE_NOT_FOUND",
+                                "No planar face of a solid body has its outward normal along direction: check the direction (part coordinates) or give face_index.");
+                        faceIndex = exit.Value<int>("face_index");
+                        var ep = (JArray)exit["point"];
+                        pts.Clear();
+                        pts.Add(new[] { (double)ep[0], (double)ep[1], (double)ep[2] });
+                        result["exit_face"] = exit;
+                        if (exit.Value<double>("body_extent_beyond_mm") > 0.5)
+                            warnings.Add($"solid geometry reaches {exit.Value<double>("body_extent_beyond_mm")} mm beyond the exit face along direction (box estimate): check the face is the wire exit");
+                    }
                     if (pts.Count != 1)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "INVALID_PARAMETER", "point must be one JSON [x, y, z] in meters (part coordinates).");
+                            "INVALID_PARAMETER", "point must be one JSON [x, y, z] in meters (part coordinates); optional for a connection point given by direction.");
                     if (kind == "connection" && faceIndex < 0)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "INVALID_PARAMETER", "a connection point needs face_index: the face the cable leaves through (analyze_model(faces)).");
+                            "INVALID_PARAMETER", "a connection point needs face_index (the face the cable leaves through, analyze_model(faces)) or direction (its outward normal).");
 
                     // A 3D sketch holding the single point that marks the routing point.
                     var sm = doc.SketchManager;
@@ -565,6 +600,29 @@ namespace SolidworksExecution.Services
         }
 
         // The route feature (Route1) of a route sub-assembly, in the context of the top assembly.
+        // The 3D sketch of a route sub-assembly, read through the component (route-assembly
+        // coordinates = top coordinates: the route sits at the identity), without editing it.
+        private static ISketch RouteSketchOf(IComponent2 routeComp)
+        {
+            var f = routeComp.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                string t = "";
+                try { t = f.GetTypeName2() ?? ""; } catch { }
+                if (t == "3DProfileFeature" && f.GetSpecificFeature2() is ISketch sk) return sk;
+                var sub = f.GetFirstSubFeature() as IFeature;
+                while (sub != null)
+                {
+                    string st = "";
+                    try { st = sub.GetTypeName2() ?? ""; } catch { }
+                    if (st == "3DProfileFeature" && sub.GetSpecificFeature2() is ISketch ssk) return ssk;
+                    sub = sub.GetNextSubFeature() as IFeature;
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+            return null;
+        }
+
         private static IFeature RouteFeatureOf(IComponent2 routeComp)
         {
             var f = routeComp.FirstFeature() as IFeature;
@@ -655,6 +713,81 @@ namespace SolidworksExecution.Services
             return o;
         }
 
+        // The cable exit: a planar face of the part's solid bodies whose outward normal is dir (within
+        // ~8 deg), indexed like SelectFaceByIndexAppend / analyze_model(faces), within `depth` (m) of
+        // the outermost such face: the one whose centre is nearest to near (projected), else the
+        // largest.
+        // Returns {face_index, point (on the face), height_mm, area_mm2, body_extent_beyond_mm,
+        // candidates}.
+        private static JObject FindExitFace(IModelDoc2 doc, double[] dir, double[] near, double depth = 0.001)
+        {
+            var part = doc as IPartDoc;
+            var bodies = part?.GetBodies2(0 /* swSolidBody */, true) as object[];
+            if (bodies == null) return null;
+            var cands = new List<Tuple<int, double, double, double[]>>();   // index, height, area, centre
+            double bodyMax = double.MinValue;
+            int idx = 0;
+            foreach (var b in bodies)
+            {
+                var body = b as IBody2;
+                if (body == null) continue;
+                if (body.GetBodyBox() is double[] bb && bb.Length >= 6)
+                    for (int m = 0; m < 8; m++)
+                    {
+                        var c = new[] { (m & 1) == 0 ? bb[0] : bb[3], (m & 2) == 0 ? bb[1] : bb[4], (m & 4) == 0 ? bb[2] : bb[5] };
+                        bodyMax = Math.Max(bodyMax, Dot(c, dir));
+                    }
+                if (!(body.GetFaces() is object[] fs)) continue;
+                foreach (var fo in fs)
+                {
+                    var face = fo as IFace2;
+                    int i = idx++;
+                    if (face == null) continue;
+                    try
+                    {
+                        var surf = face.IGetSurface();
+                        if (surf == null || !surf.IsPlane()) continue;
+                        if (!(face.Normal is double[] n) || n.Length < 3) continue;
+                        if (Dot(Unit(n), dir) < 0.99) continue;
+                        if (!(face.GetBox() is double[] fb) || fb.Length < 6) continue;
+                        var centre = new[] { (fb[0] + fb[3]) / 2, (fb[1] + fb[4]) / 2, (fb[2] + fb[5]) / 2 };
+                        var uv = face.GetUVBounds() as double[];
+                        double h = Dot(centre, dir);
+                        if (uv != null && uv.Length >= 4 && surf.Evaluate((uv[0] + uv[1]) / 2, (uv[2] + uv[3]) / 2, 0, 0) is double[] sp && sp.Length >= 3)
+                            h = Dot(new[] { sp[0], sp[1], sp[2] }, dir);
+                        cands.Add(Tuple.Create(i, h, face.GetArea(), centre));
+                    }
+                    catch { }
+                }
+            }
+            if (cands.Count == 0) return null;
+            // Within `depth` of the outermost: terminal tips or ribs often stand a fraction of a mm
+            // proud of the housing's rear face (a 0.29 mm2 tip 0.2 mm beyond a 59 mm2 face).
+            double top = cands.Max(c => c.Item2);
+            var outer = cands.Where(c => c.Item2 > top - depth).ToList();
+            Tuple<int, double, double, double[]> pick;
+            if (near != null)
+                pick = outer.OrderBy(c => { var d = Sub(c.Item4, near); var a = Sub(d, Scale(dir, Dot(d, dir))); return Dot(a, a); }).First();
+            else pick = outer.OrderByDescending(c => c.Item3).First();
+            var basePt = near ?? pick.Item4;
+            var onFace = Add(basePt, Scale(dir, pick.Item2 - Dot(basePt, dir)));
+            var cj = new JArray(cands.OrderByDescending(c => c.Item2).Take(5).Select(c => new JObject
+            {
+                ["face_index"] = c.Item1,
+                ["height_mm"] = Math.Round(c.Item2 * 1000, 3),
+                ["area_mm2"] = Math.Round(c.Item3 * 1e6, 2),
+            }));
+            return new JObject
+            {
+                ["face_index"] = pick.Item1,
+                ["point"] = new JArray(Math.Round(onFace[0], 7), Math.Round(onFace[1], 7), Math.Round(onFace[2], 7)),
+                ["height_mm"] = Math.Round(pick.Item2 * 1000, 3),
+                ["area_mm2"] = Math.Round(pick.Item3 * 1e6, 2),
+                ["body_extent_beyond_mm"] = Math.Round(Math.Max(0, bodyMax - pick.Item2) * 1000, 3),
+                ["candidates"] = cj,
+            };
+        }
+
         public ExecutionResponse RoutePath(ToolRequest request)
         {
             if (_guard.IsDuplicate(request.OperationId))
@@ -673,6 +806,21 @@ namespace SolidworksExecution.Services
                 string pointsJson = p?.Value<string>("points") ?? "";
                 double bendRadius = p?.Value<double?>("bend_radius") ?? 0.0;
                 bool exit = p?.Value<bool?>("exit_route") ?? true;
+                // dry_run: snap and check the points against the route as it is, report the lengths,
+                // draw nothing. Checks that refuse a draw that would leave wires unrouted:
+                // - an end that does not snap onto a route point but lies within free_end_tolerance
+                //   of one (a branch started at a corner whose fillet removed the vertex, 3.9 mm off),
+                //   unless allow_free_ends;
+                // - corners deflecting less than min_corner_deg are drawn sharp: with a fillet, a 4 deg
+                //   corner split the route into disconnected segments.
+                bool dryRun = p?.Value<bool?>("dry_run") ?? false;
+                bool allowFree = p?.Value<bool?>("allow_free_ends") ?? false;
+                double freeTol = p?.Value<double?>("free_end_tolerance") ?? 0.02;
+                double minCornerDeg = p?.Value<double?>("min_corner_deg") ?? 10.0;
+                bool enteredHere = false;
+                if (dryRun && (string.IsNullOrWhiteSpace(pointsJson) || pointsJson.Trim() == "[]"))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "INVALID_PARAMETER", "dry_run needs points: the path to check.");
 
                 var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = doc as IAssemblyDoc;
@@ -687,7 +835,22 @@ namespace SolidworksExecution.Services
                 var steps = new JArray();
                 var warnings = new JArray();
                 var routeComp = RouteBeingEdited(asm);
-                if (routeComp == null)
+                ISketch dryRunSketch = null;
+                if (routeComp == null && dryRun)
+                {
+                    // A dry run reads the route sketch through the component, without EditRoute:
+                    // leaving route edit makes SOLIDWORKS rewrite the route's segmentList.xml.
+                    routeComp = string.IsNullOrEmpty(routeName) ? null : FindComponentByName(asm, routeName);
+                    if (routeComp == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "COMPONENT_NOT_FOUND", "Name the route sub-assembly in 'route' (routing_status lists them).");
+                    dryRunSketch = RouteSketchOf(routeComp);
+                    if (dryRunSketch == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "SKETCH_FAILED", $"No route sketch found in {ComponentPath(routeComp)}.");
+                    steps.Add("dry run: route sketch read without editing the route");
+                }
+                else if (routeComp == null)
                 {
                     routeComp = string.IsNullOrEmpty(routeName) ? null : FindComponentByName(asm, routeName);
                     if (routeComp == null)
@@ -701,6 +864,7 @@ namespace SolidworksExecution.Services
                     steps.Add($"select {rf.Name} ({rf.GetTypeName2()}): " + rf.Select2(false, 0));
                     rm.EditRoute();
                     steps.Add("EditRoute");
+                    enteredHere = true;
                 }
                 else steps.Add("already editing " + ComponentPath(routeComp));
                 var routeAsm = routeComp.GetModelDoc2() as IModelDoc2;
@@ -712,6 +876,11 @@ namespace SolidworksExecution.Services
                 {
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "INVALID_PARAMETER", "add_cpoints must be a JSON list of [component, cpoint]: " + ex.Message);
+                }
+                if (dryRun && adds.Count > 0)
+                {
+                    warnings.Add("dry run: add_cpoints not applied");
+                    adds = new JArray();
                 }
                 foreach (var a in adds)
                 {
@@ -728,7 +897,7 @@ namespace SolidworksExecution.Services
                 doc.ClearSelection2(true);
 
                 var sm = doc.SketchManager;
-                var sk = sm.ActiveSketch as ISketch;
+                var sk = dryRunSketch ?? sm.ActiveSketch as ISketch;
                 steps.Add("active sketch: " + (sk != null ? ((sk as IFeature)?.Name ?? "(route sketch)") : "none"));
 
                 double expected = -1;
@@ -747,6 +916,7 @@ namespace SolidworksExecution.Services
                     // move earlier geometry by a few um, so a bundle drawn to the coordinates an
                     // earlier call returned no longer meets it (found 2026-11-12: a 7 um gap at a
                     // breakout). Snap both ends to the nearest existing sketch point as it is NOW.
+                    var looseEnds = new List<string>();
                     if (snapTol > 0)
                     {
                         var existing = SketchPointsOf(sk);
@@ -767,7 +937,12 @@ namespace SolidworksExecution.Services
                                 pts[end] = new[] { bp[0], bp[1], bp[2] };
                             }
                             else
+                            {
                                 steps.Add($"{which} is a new route point (nearest existing {(bp == null ? "none" : Math.Round(best * 1000, 3) + " mm")})");
+                                if (bp != null && best <= freeTol)
+                                    looseEnds.Add($"{which} point {(end == 0 ? 0 : pts.Count - 1)} misses the route by {Math.Round(best * 1000, 3)} mm "
+                                        + $"(nearest route point [{Math.Round(bp[0], 6)}, {Math.Round(bp[1], 6)}, {Math.Round(bp[2], 6)}])");
+                            }
                         }
                     }
                     var radii = new double[Math.Max(0, pts.Count - 2)];
@@ -780,6 +955,41 @@ namespace SolidworksExecution.Services
                             return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                                 "INVALID_PARAMETER", $"bend_radii needs one radius per corner: {radii.Length} for {pts.Count} points.");
                         for (int i = 0; i < radii.Length; i++) radii[i] = (double)ra[i];
+                    }
+                    for (int i = 1; i < pts.Count - 1; i++)
+                    {
+                        if (radii[i - 1] <= 0) continue;
+                        double[] u0 = Unit(Sub(pts[i], pts[i - 1])), v0 = Unit(Sub(pts[i + 1], pts[i]));
+                        double defl = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(u0, v0)))) * 180.0 / Math.PI;
+                        if (defl < minCornerDeg)
+                        {
+                            warnings.Add($"corner {i} deflects {Math.Round(defl, 2)} deg (< min_corner_deg {minCornerDeg}): drawn sharp, radius {Math.Round(radii[i - 1] * 1000, 3)} mm ignored");
+                            radii[i - 1] = 0;
+                        }
+                    }
+                    if (looseEnds.Count > 0 && !allowFree)
+                    {
+                        if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); } catch { } }
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "END_NOT_ON_ROUTE",
+                            "Nothing drawn: " + string.Join("; ", looseEnds) + ". Wires cannot cross a gap. A branch that starts at a corner of an earlier "
+                            + "call misses it because the corner's fillet removed that vertex: put branch nodes on straight legs, at least "
+                            + "r*tan(deflection/2) from a corner, or start on a point the route has (the sketch points route_path returns). "
+                            + "allow_free_ends=true draws it anyway.");
+                    }
+                    if (dryRun)
+                    {
+                        var geo = PolylineGeometry(pts, radii);
+                        if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); steps.Add("ExitRoute (dry run)"); } catch { } }
+                        var dr = new JObject
+                        {
+                            ["route"] = ComponentPath(routeComp),
+                            ["dry_run"] = true,
+                            ["points"] = new JArray(pts.Select(q => new JArray(Math.Round(q[0], 6), Math.Round(q[1], 6), Math.Round(q[2], 6)))),
+                            ["geometry"] = geo,
+                            ["steps"] = steps,
+                        };
+                        if (warnings.Count > 0) dr["warnings"] = warnings;
+                        return ReadOnlyResponse(request, doc, dr);
                     }
                     bool prevDb = sm.AddToDB;
                     int[] toggles = { 249, 9, 266, 271, 270 };
@@ -816,7 +1026,7 @@ namespace SolidworksExecution.Services
                 {
                     try { rm.ExitRoute(); steps.Add("ExitRoute"); } catch (Exception ex) { steps.Add("ExitRoute failed: " + ex.Message); }
                     try { asm.EditAssembly(); steps.Add("EditAssembly"); } catch (Exception ex) { steps.Add("EditAssembly failed: " + ex.Message); }
-                    try { doc.ForceRebuild3(false); } catch { }
+                    try { doc.EditRebuild3(); } catch { }
                     // Wires (from a from-to import) follow the new geometry: route them, report them.
                     if (p?.Value<bool?>("route_wires") ?? true)
                     {
@@ -887,6 +1097,12 @@ namespace SolidworksExecution.Services
                 string routeName = p?.Value<string>("route") ?? "";
                 bool routeWires = p?.Value<bool?>("route_wires") ?? true;
                 string refsJson = p?.Value<string>("references") ?? "{}";
+                // replaces: the route sub-assembly this import replaces (deleted before the import,
+                // its Harness_<n> files after); configurations: the configurations of the active
+                // assembly that show the new route (the first is active during the import); it is
+                // suppressed in all the others (a component added in one configuration shows in all).
+                string replaces = p?.Value<string>("replaces") ?? "";
+                var showIn = ParseNameList(p?["configurations"]);
 
                 foreach (var f in new[] { fromTo, compLib, cableLib })
                     if (!string.IsNullOrEmpty(f) && !System.IO.File.Exists(f))
@@ -908,6 +1124,45 @@ namespace SolidworksExecution.Services
 
                 var steps = new JArray();
                 var warnings = new JArray();
+                string[] cfgNames = (doc.GetConfigurationNames() as object[])?.Select(o => o.ToString()).ToArray() ?? new string[0];
+                foreach (var cn in showIn)
+                    if (!cfgNames.Contains(cn, StringComparer.OrdinalIgnoreCase))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "CONFIGURATION_NOT_FOUND",
+                            $"'{cn}' is not a configuration of {doc.GetTitle()} ({string.Join(", ", cfgNames)}).");
+                if (showIn.Count > 0)
+                {
+                    string act = (doc.GetActiveConfiguration() as IConfiguration)?.Name;
+                    if (!string.Equals(act, showIn[0], StringComparison.OrdinalIgnoreCase))
+                        steps.Add($"activate configuration {showIn[0]}: " + doc.ShowConfiguration2(showIn[0]));
+                }
+                var oldFiles = new List<string>();
+                if (!string.IsNullOrEmpty(replaces))
+                {
+                    var old = FindComponentByName(asm, replaces);
+                    if (old == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COMPONENT_NOT_FOUND",
+                            "replaces: " + ComponentNotFoundMessage(asm, replaces));
+                    bool oldIsRoute = false;
+                    try { oldIsRoute = (old.GetModelDoc2() as IAssemblyDoc)?.IsRouteAssembly() ?? false; } catch { }
+                    if (!oldIsRoute)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "WRONG_COMPONENT_TYPE",
+                            $"replaces: {ComponentPath(old)} is not a route sub-assembly (or it is suppressed / lightweight: resolve it first).");
+                    string op = old.GetPathName();
+                    if (!string.IsNullOrEmpty(op))
+                    {
+                        string b0 = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(op), System.IO.Path.GetFileNameWithoutExtension(op));
+                        oldFiles.AddRange(new[] { op, b0 + "-fromToList.xml", b0 + "-segmentList.xml" });
+                    }
+                    string oldPath = ComponentPath(old);
+                    doc.ClearSelection2(true);
+                    bool sel = old.Select4(false, null, false);
+                    bool del = sel && doc.Extension.DeleteSelection2(0);
+                    doc.ClearSelection2(true);
+                    steps.Add($"delete replaced route {oldPath}: {del}");
+                    if (!del)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "DELETE_FAILED",
+                            $"Could not delete the replaced route {oldPath} (nothing imported).");
+                }
                 var refs = JObject.Parse(refsJson);
                 foreach (var kv in refs)
                 {
@@ -1023,9 +1278,38 @@ namespace SolidworksExecution.Services
                         if (isRoute) routes.Add(ComponentPath(cc));
                     }
                 result["route_assemblies"] = routes;
+
+                // The new route only in its configurations.
+                if (showIn.Count > 0 && routeComp != null && result["new_route"] != null)
+                {
+                    string newPath = ComponentPath(routeComp);
+                    var hidden = new JArray();
+                    foreach (var cn in cfgNames.Where(c => !showIn.Contains(c, StringComparer.OrdinalIgnoreCase)))
+                    {
+                        doc.ShowConfiguration2(cn);
+                        var rc = FindComponentByName(asm, newPath);
+                        int rcode = rc == null ? -1 : rc.SetSuppression2(0);
+                        if (rcode == 2) hidden.Add(cn); else warnings.Add($"could not suppress {newPath} in configuration {cn} (code {rcode})");
+                    }
+                    doc.ShowConfiguration2(showIn[0]);
+                    result["suppressed_in"] = hidden;
+                    result["active_configuration"] = showIn[0];
+                }
                 result["steps"] = steps;
+                // Rebuild what is out of date only: ForceRebuild3 marked every loaded reference of a
+                // large assembly modified, and the next save rewrote all of them.
+                try { doc.EditRebuild3(); } catch { }
+                if (oldFiles.Count > 0)
+                {
+                    var gone = new JArray();
+                    foreach (var f in oldFiles.Where(System.IO.File.Exists))
+                    {
+                        try { System.IO.File.Delete(f); gone.Add(System.IO.Path.GetFileName(f)); }
+                        catch (Exception ex) { warnings.Add($"replaced route file not deleted ({ex.Message}): {f}"); }
+                    }
+                    result["deleted_files"] = gone;
+                }
                 if (warnings.Count > 0) result["warnings"] = warnings;
-                try { doc.ForceRebuild3(false); } catch { }
 
                 var response = new ExecutionResponse
                 {

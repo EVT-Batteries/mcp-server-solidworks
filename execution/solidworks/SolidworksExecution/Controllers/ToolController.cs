@@ -246,6 +246,7 @@ namespace SolidworksExecution.Controllers
                 case "insert_component":       return _service.InsertComponent(request);
                 case "add_mate":               return _service.AddMateTool(request);
                 case "check_interference":     return _service.CheckInterference(request);
+                case "check_path_clearance":   return _service.CheckPathClearance(request);
                 case "import_step":            return _service.ImportStep(request);
                 case "save_body_as_part":      return _service.SaveBodyAsPart(request);
                 case "routing_status":         return _service.RoutingStatus(request);

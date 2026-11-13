@@ -346,10 +346,12 @@
     "assembly_as_part": "string (optional — '', 'all_components', 'exterior_components' or 'exterior_faces': active assembly saved as a COPY to a .sldprt file_path with that geometry (user preference swSaveAssemblyAsPartOptions); Features[0] = JSON {saved_part, assembly_as_part, size_bytes})",
     "save_references": "boolean (optional, default true — in-place save of an assembly: first Save3 every modified open document among its components (GetSaveFlag), parts before assemblies, under reference_root only)",
     "reference_root": "string (optional — folder the referenced saves are limited to; default the assembly's folder)",
-    "force": "boolean (optional, default false — in-place save even when GetSaveFlag is false; otherwise an unmodified document is not written: unchanged=true)"
+    "force": "boolean (optional, default false — in-place save even when GetSaveFlag is false; otherwise an unmodified document is not written: unchanged=true)",
+    "documents": "string or array (optional - JSON list of open documents (path, title or file name) to save instead: exactly those, parts first)",
+    "verbose": "boolean (optional, default false - full lists instead of the first 20)"
    }
   },
-  "output": "→ see execution-response.json — Features[0] = saved path, Features[1] = JSON {saved, unchanged, saved_references, skipped_references:[{file, reason}], unsaved_open_documents}. Paths matching a fragment of env SOLIDPILOT_READONLY_PATHS are refused (SAVE_REFUSED) or skipped."
+  "output": "→ see execution-response.json — Features[0] = saved path, Features[1] = JSON {saved, unchanged, saved_references (count), saved_references_list (first 20 unless verbose), skipped_references:[{file, reason}], unsaved_open_documents (count), unsaved_open_documents_list}. With documents: Features[0] = JSON {saved:[paths], skipped:[{file, reason}], not_open?, unsaved_open_documents, unsaved_open_documents_list}. Paths matching a fragment of env SOLIDPILOT_READONLY_PATHS are refused (SAVE_REFUSED) or skipped."
  },
  "analyze_model": {
   "description": "Analyzes the active part document without modifying it. Does NOT increment state_version. analysis_type='mass_properties': returns volume, surface_area, center of gravity (cx/cy/cz). analysis_type='geometry': returns bodies, faces, edges, vertices counts (solid bodies), surface_bodies and box_m (IPartDoc.GetPartBox, surfaces included). analysis_type='edges': returns one JSON object listing every solid edge with start/end/midpoint 3D coords (meters, rounded to 6 decimals; closed/circular edges also include length) — pick an edge index (the `i` field) for add_edge_feature edge_indices, or a midpoint for coordinate selection. Slowest mode on very large parts (COM-bound). analysis_type='faces': returns one JSON object listing every solid face with a stable index `i` (planar faces also carry normal, area, and a representative on-plane point) — pick a face index for create_sketch(on_face, face_index). analysis_type='features': the COMPACT part recipe (default 'understand the part' read) — ordered feature tree (name/type, suppressed only when true), deduped driving dimensions (SI, rounded to 6 decimals), a per-sketch SUMMARY (segment counts + an inline {cx,cy,r} for single-full-circle profiles; NO per-segment coordinate dump), each sketch's plane {ref:'Front/Top/Right Plane', offset}, each extrude/cut's {end, depth (blind only), reversed}, pattern semantics, and equations + globals; features are in tree (history) order. analysis_type='sketch' (requires 'name'): ONE sketch's full geometry (every segment, rounded to 6 decimals) + plane — use only when exact sketch coordinates are needed. analysis_type='feature_map': per-feature geometry ATTRIBUTION — walks the tree base→end with the ROLLBACK BAR (swMoveRollbackBarTo_e) and diffs the topology between stops inside the tool; consumed_edges (both endpoints gone — trimmed neighbours excluded) are the deterministic fillet/chamfer edge anchors (PRE-feature geometry), created_faces are genuinely new surfaces (trimmed existing planes excluded). Non-destructive: the bar is restored to the end in finally; nothing is saved.",
@@ -414,7 +416,7 @@
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {sweep, action:'created'|'updated', diameter_m, path, path_length_m}."
  },
  "check_rebuild": {
-  "description": "Reports SolidWorks' What's Wrong list (IModelDocExtension.GetWhatsWrong: features, swFeatureError_e codes, warning flags) for the active document and, recursively in an assembly, for every distinct loaded component document (IAssemblyDoc.GetComponents(false), unsuppressed, GetModelDoc2). For mates, lists the component instance path each IMate2.MateEntity references (null when gone). Optionally ForceRebuild3 first. Never saves; does NOT increment state_version.",
+  "description": "Reports SolidWorks' What's Wrong list (IModelDocExtension.GetWhatsWrong: features, swFeatureError_e codes, warning flags) for the active document and, recursively in an assembly, for every distinct loaded component document (IAssemblyDoc.GetComponents(false), unsuppressed, GetModelDoc2). For mates, lists the component instance path each IMate2.MateEntity references (null when gone). Optionally EditRebuild3 (force: ForceRebuild3) first. Never saves; does NOT increment state_version.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -422,10 +424,12 @@
     "rebuild": "boolean (optional, default true — force-rebuild the active document first)",
     "recursive": "boolean (optional, default true — also check every loaded component document)",
     "include_warnings": "boolean (optional, default true)",
-    "resolve_lightweight": "boolean (optional, default false - ResolveAllLightWeightComponents first so lightweight components are checked)"
+    "resolve_lightweight": "boolean (optional, default false - ResolveAllLightWeightComponents first so lightweight components are checked)",
+    "force": "boolean (optional, default false - ForceRebuild3 on every level instead of EditRebuild3; marks every loaded reference modified)",
+    "verbose": "boolean (optional, default false - also list every lightweight component not checked)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, documents_checked, errors, warnings, clean, problems:[{document, path, first_instance?, items:[{severity, feature, type, code, meaning, mate_components?}]}], components_not_loaded?:[{component, path, reason: lightweight|not loaded|file missing}], hint?, lightweight_resolved?}."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {document, documents_checked, errors, warnings, clean, problems:[{document, path, first_instance?, items:[{severity, feature, type, code, meaning, mate_components?}]}], components_not_loaded (counts per reason), components_not_loaded_list (missing / not loaded; all with verbose), rebuild?:[{component, path, reason: lightweight|not loaded|file missing}], hint?, lightweight_resolved?}."
  },
  "component_status": {
   "description": "Reports the status of components of the active assembly: suppression state (IComponent2.GetSuppression2), visibility, fixed, envelope, referenced configuration, file path and existence, suppressed parent, ExcludeFromBOM, transform and optionally the component's mates (IComponent2.GetMates: name, type, IFeature.GetErrorCode2 error, referenced component instance paths). Components are named (Name2 or instance path) or listed from IAssemblyDoc.GetComponents and filtered by path substring and state. Does NOT increment state_version.",
@@ -437,11 +441,13 @@
     "match": "string (optional — substring of the instance path or file path)",
     "state": "string (optional — suppressed | lightweight | resolved | hidden | missing)",
     "recursive": "boolean (optional, default true — include nested components when listing)",
-    "include_mates": "boolean (optional — default true when components, match or state is given)",
-    "limit": "integer (optional, default 500 — maximum entries listed)"
+    "include_mates": "boolean (optional, default false - read each component's mates: slow on a large assembly)",
+    "limit": "integer (optional, default 500 — maximum entries listed)",
+    "boxes": "boolean (optional, default false - world bounding box per component, box_mm)",
+    "time_budget_s": "number (optional, default 60, 0 = none - stop listing / mate scans after this many seconds, truncated=true)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached."
  },
  "set_component_state": {
   "description": "Sets the suppression state (IComponent2.SetSuppression2: suppressed, lightweight, resolved, fully resolved) and / or visibility (IComponent2.Visible) of components of the active assembly, nested ones by instance path; all names are resolved before anything changes. Rebuilds (EditRebuild3), never saves. Increments state_version.",
@@ -453,7 +459,8 @@
     "suppression": "string (optional — suppressed | resolved | lightweight | fully_resolved; 'unsuppress' = resolved)",
     "visible": "boolean (optional — true shows, false hides)",
     "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration)",
-    "include_mates": "boolean (optional, default true — false leaves mates out of the status after the change; the mate scan is slow on large assemblies)"
+    "include_mates": "boolean (optional, default false - mates of each component in the report after the change)",
+    "time_budget_s": "number (optional, default 60 - bound on the mate scans of the report)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included unless include_mates=false], all_ok, note}."
@@ -546,7 +553,10 @@
     "width": "integer (optional, default 0 = window width — image width in pixels)",
     "height": "integer (optional, default 0 = window height — image height in pixels)",
     "caption": "string (optional — text drawn in a white band under the image, lines split on '\\n', first line bold)",
-    "zoom_box": "number[6] (optional — [x1,y1,z1,x2,y2,z2] in meters, model coordinates: IModelDoc2.ViewZoomTo2 on that region instead of zoom to fit)"
+    "zoom_box": "number[6] (optional — [x1,y1,z1,x2,y2,z2] in meters, model coordinates: the 8 corners are projected into the view frame (IModelView.Orientation3) and that rectangle, in view coordinates, is passed to IModelDoc2.ViewZoomTo2)",
+    "focus": "string or array (optional - JSON list of component names / instance paths: ViewZoomToSelection on them)",
+    "isolate": "boolean (optional, default false - IAssemblyDoc.Isolate on the focus components for the capture, ExitIsolate afterwards)",
+    "margin": "number (optional, default 0.1 - extra frame around zoom_box, fraction of its size)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {file_path, width, height, view}."
@@ -877,10 +887,32 @@
     "resolve_lightweight": "boolean (optional, default false - ResolveAllLightWeightComponents before a whole-assembly check)",
     "limit": "integer (optional, default 100 - max interferences / violations listed)",
     "compact": "boolean (optional, default false - counts instead of long lists: not_measured_count + not_measured_neighbours, resolved_from_lightweight_count)",
-    "ignore_same_parent": "boolean (optional, default false - leave out interferences / clearance violations whose components all share one parent sub-assembly; reported as ignored_same_parent)"
+    "ignore_same_parent": "boolean (optional, default false - leave out interferences / clearance violations whose components all share one parent sub-assembly; reported as ignored_same_parent)",
+    "boxes": "boolean (optional, default false - neighbours as [{component, box_mm}], world bounding boxes)"
    }
   },
   "output": "-> see execution-response.json - CadState.Features holds a single JSON string {assembly, checked, neighbours_checked?, neighbours? (not compact: instance paths), interference_count, interferences:[{components, volume_m3, volume_mm3, box_min?, box_max?, possible_only?}], interferences_truncated_at?, clearance?:{required_m, violation_count, violations:[{a, b, distance_m, distance_mm}], distances_mm? (not compact: every pair, null = not measured), nearest_m?, nearest_pair?, not_measured?}, lightweight_resolved?, resolved_from_lightweight?, lightweight_not_checked?, warning?, clear}."
+ },
+ "check_path_clearance": {
+  "description": "Active assembly: checks a candidate bundle path before anything is drawn on it. Builds the path(s) as circular-profile sweeps (filleted polyline, as create_3d_path) in a temporary part (default part template, saved under %TEMP%\\solidpilot_probe), inserts it at the assembly origin (identity transform), runs check_interference on that component (compact), maps each interference to the nearest path leg, then deletes the component, closes and deletes the part (unless keep_probe). Does not change state_version; the assembly is left marked modified.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "points": "string (optional - JSON [[x,y,z],...] in meters, assembly coordinates; or use paths)",
+    "diameter": "number (meters - bundle diameter; per path in paths)",
+    "bend_radius": "number (optional, meters - every corner)",
+    "bend_radii": "string (optional - JSON list, one radius per corner)",
+    "paths": "string or array (optional - JSON list of {points, bend_radii, bend_radius, diameter})",
+    "clearance": "number (optional, meters, default 0 - also report neighbours closer than this)",
+    "ignore": "string or array (optional - JSON list of name fragments to leave out of the report)",
+    "include_hidden": "boolean (optional, default false)",
+    "ignore_same_parent": "boolean (optional, default false)",
+    "limit": "integer (optional, default 50)",
+    "keep_probe": "boolean (optional, default false - leave the probe component in the assembly)"
+   }
+  },
+  "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, warning?, clear, probe_component?, note?, cleanup}"
  },
  "import_step": {
   "description": "Imports a neutral file (STEP / IGES / Parasolid / SAT) through open_document's staged import, saves the import as a .SLDPRT (IModelDocExtension.SaveAs3; an assembly import becomes a multi-body part), closes the import document (ISldWorks.CloseDoc) and reopens the saved part (OpenDoc6) as the active document, so part queries work on it. Refuses to overwrite an existing part unless overwrite. Increments state_version.",
@@ -901,7 +933,8 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "route": "string (optional - a route sub-assembly instance to read wires and segments from)"
+    "route": "string (optional - a route sub-assembly instance to read wires and segments from)",
+    "verbose": "boolean (optional, default false - every routing library location and the from-to header definitions)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm}], cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
@@ -920,7 +953,10 @@
     "diameter": "number (optional, meters - nominal diameter)",
     "stub_length": "number (optional, meters - default route stub length)",
     "sub_type": "integer (optional, default 2 - swElectricalConnectionPointType_e)",
-    "reverse": "boolean (optional, default false - flip the exit direction)"
+    "reverse": "boolean (optional, default false - flip the exit direction)",
+    "direction": "string (optional - JSON [dx,dy,dz], part coordinates: the outward normal of the cable exit, instead of face_index; the outermost such planar face is used)",
+    "verbose": "boolean (optional, default false - full routing library locations)",
+    "exit_depth": "number (optional, meters, default 0.001 - faces within this of the outermost one along direction are candidates)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {routing, sketch, inserted, feature, feature_type, routing_points, routing_component, warnings?}"
@@ -942,10 +978,12 @@
     "search_sub_assemblies": "boolean (optional, default true)",
     "press_ok": "integer (optional, default 3 - PmOK presses after the import)",
     "route": "string (optional - route to use when the import makes no new one)",
-    "edit_route_first": "boolean (optional, default false - EditRoute on 'route' before the import)"
+    "edit_route_first": "boolean (optional, default false - EditRoute on 'route' before the import)",
+    "replaces": "string (optional - route sub-assembly deleted before the import, its Harness_<n> files after)",
+    "configurations": "string or array (optional - JSON list: configurations showing the new route; the first is active for the import, the route is suppressed in the others)"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {imported, new_route?, route?:{component, wires, cables_count, segments}, route_assemblies, steps, warnings?}"
+  "output": "-> see execution-response.json - Features[0] = JSON {imported, new_route?, route?:{component, wires, cables_count, segments}, route_assemblies, steps, warnings?} With replaces: deleted_files. With configurations: suppressed_in, active_configuration."
  },
  "route_path": {
   "description": "Active assembly: edits a route (Route feature + IRouteManager.EditRoute, unless one is being edited), adds connection points (AddToRoute), snaps the first / last point onto the nearest existing route sketch point within snap_tolerance, draws a filleted 3D polyline in the route sketch (AddToDB), merges points within merge_tolerance (MergePoints, also without points), optionally ExitRoute + EditAssembly + RouteWires. Increments state_version.",
@@ -961,10 +999,14 @@
     "exit_route": "boolean (optional, default true)",
     "route_wires": "boolean (optional, default true - after exit)",
     "snap_tolerance": "number (optional, meters, default 0.0005 - 0 = no snapping)",
-    "merge_tolerance": "number (optional, meters, default 1e-5 - 0 = no merge)"
+    "merge_tolerance": "number (optional, meters, default 1e-5 - 0 = no merge)",
+    "dry_run": "boolean (optional, default false - read the route sketch without EditRoute, snap and check, return the points and their geometry; draws nothing)",
+    "allow_free_ends": "boolean (optional, default false - draw an end that misses the route within free_end_tolerance)",
+    "free_end_tolerance": "number (optional, meters, default 0.02 - an unsnapped end this close to a route point fails END_NOT_ON_ROUTE)",
+    "min_corner_deg": "number (optional, degrees, default 10 - corners deflecting less are drawn sharp)"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?}"
+  "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, steps, warnings?}."
  },
  "route_guidelines": {
   "description": "Active assembly: edits a route and converts its guidelines into route geometry (IAutoRoute.ShowGuidelines, SelectGuidelines, ConvertGuidelinesToRoute), optionally exits. Increments state_version.",

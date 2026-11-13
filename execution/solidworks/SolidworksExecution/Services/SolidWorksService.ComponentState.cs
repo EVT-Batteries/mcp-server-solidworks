@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -55,6 +56,11 @@ namespace SolidworksExecution.Services
                 bool? includeMatesParam = p?["include_mates"] == null || p["include_mates"].Type == JTokenType.Null
                     ? (bool?)null : p.Value<bool>("include_mates");
                 int limit = p?.Value<int?>("limit") ?? 500;
+                bool boxes = p?.Value<bool?>("boxes") ?? false;
+                // Whole-assembly loops and mate scans stop after this many seconds and return what
+                // they have (truncated): a named-component mate scan once held SolidWorks for 25 min.
+                double budget = p?.Value<double?>("time_budget_s") ?? 60;
+                var deadline = budget > 0 ? DateTime.UtcNow.AddSeconds(budget) : DateTime.MaxValue;
 
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = modelDoc as IAssemblyDoc;
@@ -62,10 +68,10 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "WRONG_DOCUMENT_TYPE", "component_status requires an active assembly.");
 
-                // Mates are read per component (slow on big assemblies): by default only when the
-                // components are named or filtered.
-                bool includeMates = includeMatesParam ??
-                    (wanted.Count > 0 || !string.IsNullOrEmpty(match) || !string.IsNullOrEmpty(stateFilter));
+                // Mates are read per component by scanning every mate of the assembly and of each
+                // parent sub-assembly: minutes on a large assembly. Only on request.
+                bool includeMates = includeMatesParam ?? false;
+                bool truncated = false;
 
                 var list = new JArray();
                 var counts = new JObject();
@@ -78,7 +84,8 @@ namespace SolidworksExecution.Services
                         var c = FindComponentByName(asm, n);
                         if (c == null) { missing.Add(n); continue; }
                         total++;
-                        list.Add(ComponentStatusJson(c, includeMates));
+                        if (DateTime.UtcNow > deadline) { truncated = true; break; }
+                        list.Add(ComponentStatusJson(c, includeMates, boxes, deadline));
                     }
                 }
                 else if (asm.GetComponents(!recursive) is object[] comps)
@@ -96,7 +103,8 @@ namespace SolidworksExecution.Services
                             continue;
                         if (!StateMatches(c, state, stateFilter)) continue;
                         if (list.Count >= limit) continue;
-                        list.Add(ComponentStatusJson(c, includeMates));
+                        if (DateTime.UtcNow > deadline) { truncated = true; break; }
+                        list.Add(ComponentStatusJson(c, includeMates, boxes, deadline));
                     }
                 }
 
@@ -114,6 +122,11 @@ namespace SolidworksExecution.Services
                     result["not_found_hint"] = ComponentNotFoundMessage(asm, (string)missing[0]);
                 }
                 if (wanted.Count == 0 && list.Count >= limit) result["truncated_at"] = limit;
+                if (truncated || list.Any(j => j["mates_truncated"] != null))
+                {
+                    result["truncated"] = true;
+                    result["truncated_reason"] = $"time_budget_s {budget} s reached: partial result. Name fewer components, leave include_mates off, or raise time_budget_s.";
+                }
 
                 return ReadOnlyResponse(request, modelDoc, result);
             }
@@ -150,7 +163,8 @@ namespace SolidworksExecution.Services
                 string refConfig = p?.Value<string>("referenced_configuration") ?? "";
                 // The mate report after the change scans every mate per component: minutes on a
                 // large assembly. include_mates=false skips it.
-                bool includeMatesAfter = p?.Value<bool?>("include_mates") ?? true;
+                bool includeMatesAfter = p?.Value<bool?>("include_mates") ?? false;
+                double budgetSet = p?.Value<double?>("time_budget_s") ?? 60;
 
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = modelDoc as IAssemblyDoc;
@@ -239,7 +253,8 @@ namespace SolidworksExecution.Services
 
                 // State after the rebuild, mates included: a resolved component shows its broken mates.
                 var after = new JArray();
-                foreach (var c in comps) after.Add(ComponentStatusJson(c, includeMatesAfter));
+                var deadlineSet = budgetSet > 0 ? DateTime.UtcNow.AddSeconds(budgetSet) : DateTime.MaxValue;
+                foreach (var c in comps) after.Add(ComponentStatusJson(c, includeMatesAfter && DateTime.UtcNow < deadlineSet, false, deadlineSet));
 
                 var result = new JObject
                 {
@@ -359,7 +374,7 @@ namespace SolidworksExecution.Services
             try { return string.IsNullOrEmpty(f) || File.Exists(f); } catch { return true; }
         }
 
-        private JObject ComponentStatusJson(IComponent2 c, bool includeMates)
+        private JObject ComponentStatusJson(IComponent2 c, bool includeMates, bool boxes = false, DateTime? deadline = null)
         {
             string state = SuppressionName(c);
             var j = new JObject
@@ -386,12 +401,21 @@ namespace SolidworksExecution.Services
                 if (tj != null) j["transform"] = tj;
             }
 
+            if (boxes && state != "suppressed")
+            {
+                // World (top-assembly) bounding box, mm: a rough keep-out zone. Sheet-metal
+                // brackets fill little of their box.
+                var b = ComponentBox(c);
+                if (b != null) j["box_mm"] = new JArray(b.Select(v => Math.Round(v * 1000, 2)));
+            }
             if (includeMates)
             {
                 int broken = 0;
-                var mates = MatesOfComponent(c, ref broken);
+                bool cut = false;
+                var mates = MatesOfComponent(c, ref broken, deadline ?? DateTime.MaxValue, ref cut);
                 j["mates"] = mates;
                 if (broken > 0) j["broken_mates"] = broken;
+                if (cut) j["mates_truncated"] = true;
             }
             return j;
         }
@@ -400,7 +424,7 @@ namespace SolidworksExecution.Services
         // every sub-assembly above the component (IComponent2.GetMates returns nothing for nested or
         // lightweight components). Each mate: the assembly holding it (instance path, "" = the active
         // one), its name, type, suppression, rebuild error and the full instance paths it references.
-        private JArray MatesOfComponent(IComponent2 c, ref int broken)
+        private JArray MatesOfComponent(IComponent2 c, ref int broken, DateTime deadline, ref bool truncated)
         {
             var mates = new JArray();
             var top = _solidWorks.IActiveDoc2 as IModelDoc2;
@@ -430,6 +454,7 @@ namespace SolidworksExecution.Services
                 IComponent2 owner = level >= 0 ? chain[level] : null;
                 foreach (var f in MateFeatures(kv.Key))
                 {
+                    if (DateTime.UtcNow > deadline) { truncated = true; break; }
                     var mate = f.GetSpecificFeature2() as IMate2;
                     if (mate == null) continue;
                     var ents = new JArray();

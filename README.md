@@ -104,7 +104,7 @@ The `adapters/` layer is provider-specific and replaceable. Because the executio
 
 ## Tool List
 
-The system currently exposes **67 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
+The system currently exposes **68 tools** for *doing* and **13 MCP resources** for *reading* — the recipe is served through BOTH `get_recipe(section)` and `recipe://usage/*`, because MCP resources sit in the client's action space and not every host lets a model reach one. A contract test keeps both surfaces honest — the adapter against the execution contract, and every resource URI mentioned in the adapter against what is actually registered (see [CONTRIBUTING.md](CONTRIBUTING.md)). Most tools are low-level CAD operations; a few (`save_analysis`, `rebuild_from_ir`, `submit_feature_graph`, `compare_parts`, `compare_assemblies`) drive the analysis / IR round-trip described below. All lengths are in meters (SolidWorks internal units).
 
 The **resources** carry the rule set and the contracts, not behaviour: `recipe://usage/index` plus one static `recipe://usage/<section>` per rule section, and `schema://feature-graph` + `schema://analysis-artifact`. The split is deliberate — a tool's description is paid on every single turn whether or not it is used, while a resource body costs only when read, so near-static reference material belongs on the resource side.
 
@@ -114,7 +114,7 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `open_document` — opens an existing file from disk (native `.sldprt`/`.sldasm`/`.slddrw`; imports `.ipt`/`.CATPart`/STEP/IGES via 3D Interconnect when the translator is available, otherwise returns a clear `OPEN_FAILED`); `lightweight` opens an assembly's components lightweight or fully resolved.
 - `import_step` — imports a STEP / IGES / Parasolid file, saves it as a `.SLDPRT` and leaves that part open (not the import document), with its bodies and bounding box.
 - `activate_document` — switches between open documents.
-- `save_document` — saves the part or drawing to disk; with `assembly_as_part`, saves a copy of the active assembly as one part (exterior components / all components as solids, or exterior faces as surfaces).
+- `save_document` — saves the part or drawing to disk (an assembly with its modified references, or only the named `documents`); with `assembly_as_part`, saves a copy of the active assembly as one part (exterior components / all components as solids, or exterior faces as surfaces).
 - `close_document` — closes the document.
 
 ### Sketch
@@ -145,10 +145,10 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 - `analyze_model` — `geometry`, `mass_properties`, `bodies` (per-body fingerprints for multibody parts), `features` (a compact feature-level recipe), `edges`, `faces`, `sketch` (one sketch's exact segments on demand), and `feature_map` (per-feature consumed/created topology — the source of the reference-resolver anchors) modes.
 - `get_selection` — reads the geometry the user selected in the SolidWorks GUI and maps it to the analyze index.
 - `measure_curves` — true 3D lengths of sweep paths and 3D sketches (lines, arcs, splines), in a part or across every component of an assembly (e.g. cable and wire lengths); `include_geometry` adds each segment's 3D points (assembly coordinates in an assembly).
-- `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit or to a region of the model, and a caption band); the document file is never written.
-- `check_rebuild` — SolidWorks' What's Wrong for the active document and every loaded sub-assembly and part: rebuild errors and warnings, with the components each broken mate references.
+- `screenshot` — saves the active view as a PNG (optional standard orientation, zoom to fit, to a region of the model or to named components, optionally isolated, and a caption band); the document file is never written.
+- `check_rebuild` — SolidWorks' What's Wrong for the active document and every loaded sub-assembly and part: rebuild errors and warnings, with the components each broken mate references (rebuilds out-of-date features only unless `force`).
 - `check_interference` — interference detection for named components against the parts near them (or the whole assembly): overlapping pairs with their volume and location, and with `clearance`, every neighbour closer than a distance.
-- `component_status` — status of an assembly's components (suppressed / lightweight / resolved, hidden, fixed, missing file, suppressed parent), nested ones included, with each component's mates and their rebuild errors.
+- `component_status` — status of an assembly's components (suppressed / lightweight / resolved, hidden, fixed, missing file, suppressed parent, world bounding box), nested ones included, optionally with each component's mates and their rebuild errors, within a time budget.
 - `set_component_state` — suppresses, resolves or makes lightweight components (nested ones by instance path), shows / hides them or sets the configuration they reference, in the active configuration; rebuilds and returns their mates' status.
 - `manage_configurations` — lists, adds, activates, renames or deletes configurations of the active part or assembly (variants such as left / right hand assemblies).
 - `verify_state` — returns the current state and feature tree.
@@ -168,9 +168,10 @@ The **resources** carry the rule set and the contracts, not behaviour: `recipe:/
 ### Routing (electrical wire harnesses)
 Needs the **SOLIDWORKS Routing** add-in (SOLIDWORKS Premium), loaded at start-up (Tools › Add-Ins). These tools drive it without clicks: the PropertyManager pages Routing opens are accepted with `RunCommand(PmOK)`. A harness is modelled as: connection points on the connector parts → wires from a from-to list → route geometry per bundle → wires routed, each with its cut length.
 - `routing_status` — read-only: add-in state, library locations, from-to header definitions; a part's routing points and component type; an assembly's route sub-assemblies, and one route's wires (from/to `REF.pin`, cut length, segments, errors such as `not_routed` / `violates_bend_radius`) and segments (length, bend radius, bundle diameter).
-- `add_routing_point` — makes the active part a Routing connector / clip: a connection point (CPoint) on the cable exit face at a point, or a route point, and the component type.
-- `import_from_to` — wires from a from-to `.xlsx` (`ImportFromToList`): sets the connectors' reference designators, fills empty from-to header definitions (an empty one makes every import fail), creates the route sub-assembly with a stub per connector, optionally converts the guidelines, routes the wires and reports them.
-- `route_path` — draws route geometry (a polyline with tangent bends, like `create_3d_path`) in a route, one call per bundle; shared end points join into branches; on exit routes the wires and returns their cut lengths.
+- `add_routing_point` — makes the active part a Routing connector / clip: a connection point (CPoint) on the cable exit face (by index, or found from the exit direction) at a point, or a route point, and the component type.
+- `import_from_to` — wires from a from-to `.xlsx` (`ImportFromToList`): sets the connectors' reference designators, fills empty from-to header definitions (an empty one makes every import fail), creates the route sub-assembly with a stub per connector (optionally replacing an older route and its files, shown only in the given configurations), optionally converts the guidelines, routes the wires and reports them.
+- `route_path` — draws route geometry (a polyline with tangent bends, like `create_3d_path`) in a route, one call per bundle; shared end points join into branches; refuses ends that miss the route, draws near-straight corners sharp; `dry_run` reports the geometry without drawing; on exit routes the wires and returns their cut lengths.
+- `check_path_clearance` — checks a candidate bundle path (or a trunk and its branches) for interference in the active assembly before anything is drawn: a temporary tube is inserted, checked and removed; each hit is located on the path (leg, distance along it).
 - `route_guidelines` — converts a route's guidelines into SOLIDWORKS' own auto paths (`ConvertGuidelinesToRoute`).
 - `start_route` — starts a route at a connection point without a from-to list (cable only, no wires).
 

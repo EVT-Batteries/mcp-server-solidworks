@@ -67,13 +67,68 @@ namespace SolidworksExecution.Services
                             $"view '{view}' is not supported. Supported: current, {string.Join(", ", StandardViews.Keys)}.");
                     modelDoc.ShowNamedView2("", viewId);
                 }
-                // zoom_box: [x1,y1,z1,x2,y2,z2] in meters, model (assembly) coordinates: zoom on that
-                // region instead of fitting the whole model (IModelDoc2.ViewZoomTo2).
-                double[] zb = (p?["zoom_box"] as JArray)?.Select(t => (double)t).ToArray();
-                if (zb != null && zb.Length == 6)
+                // focus: zoom to these components (instance names or paths; world boxes), optionally
+                // with everything else hidden for the capture (isolate) and shown again afterwards.
+                // zoom_box: [x1,y1,z1,x2,y2,z2] in meters, model (assembly) coordinates.
+                var focus = ParseNameList(p?["focus"]);
+                bool isolate = p?.Value<bool?>("isolate") ?? false;
+                double margin = p?.Value<double?>("margin") ?? 0.1;
+                double[] zb = null;
+                var zbTok = p?["zoom_box"];
+                if (zbTok != null && zbTok.Type != JTokenType.Null)
+                {
+                    var za = zbTok.Type == JTokenType.String ? JArray.Parse((string)zbTok) : zbTok as JArray;
+                    zb = za?.Select(t => (double)t).ToArray();
+                    if (zb != null && zb.Length != 6)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "zoom_box needs 6 numbers [x1,y1,z1,x2,y2,z2] in meters.");
+                }
+                var info = new JObject();
+                bool focusZoomed = false;
+                if (focus.Count > 0)
+                {
+                    var asmF = modelDoc as IAssemblyDoc;
+                    if (asmF == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "WRONG_DOCUMENT_TYPE", "focus needs an active assembly.");
+                    var comps = new List<IComponent2>();
+                    foreach (var n in focus)
+                    {
+                        var c = FindComponentByName(asmF, n);
+                        if (c == null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "COMPONENT_NOT_FOUND", ComponentNotFoundMessage(asmF, n));
+                        comps.Add(c);
+                    }
+                    double[] u = null;
+                    foreach (var c in comps)
+                    {
+                        var b = ComponentBox(c);
+                        if (b == null) continue;
+                        if (u == null) u = (double[])b.Clone();
+                        else for (int i = 0; i < 3; i++) { u[i] = Math.Min(u[i], b[i]); u[i + 3] = Math.Max(u[i + 3], b[i + 3]); }
+                    }
+                    if (u == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "NO_GEOMETRY", "The focus components have no bounding box (suppressed or lightweight without graphics).");
+                    if (zb == null)
+                    {
+                        // SolidWorks' own zoom to the selected components.
+                        modelDoc.ViewZoomtofit2();
+                        modelDoc.ClearSelection2(true);
+                        foreach (var c in comps) try { c.Select4(true, null, false); } catch { }
+                        modelDoc.ViewZoomToSelection();
+                        modelDoc.ClearSelection2(true);
+                        focusZoomed = true;
+                    }
+                    info["focus_box_mm"] = new JArray(u.Select(v => Math.Round(v * 1000, 1)));
+                    if (isolate && !IsolateComponents(asmF, comps)) info["isolate_failed"] = true;
+                }
+                if (focusZoomed) { }
+                else if (zb != null)
                 {
                     modelDoc.ViewZoomtofit2();
-                    modelDoc.ViewZoomTo2(zb[0], zb[1], zb[2], zb[3], zb[4], zb[5]);
+                    ZoomToModelBox(modelDoc, zb, margin);
                 }
                 else if (fit) modelDoc.ViewZoomtofit2();
                 modelDoc.GraphicsRedraw2();
@@ -95,13 +150,15 @@ namespace SolidworksExecution.Services
                     outH = composed.Height;
                 }
 
-                var info = new JObject
+                info["file_path"] = filePath;
+                info["width"] = outW;
+                info["height"] = outH;
+                info["view"] = view;
+                if (_isolated != null)
                 {
-                    ["file_path"] = filePath,
-                    ["width"] = outW,
-                    ["height"] = outH,
-                    ["view"] = view,
-                };
+                    info["isolated"] = true;
+                    RestoreHidden(modelDoc);
+                }
 
                 return new ExecutionResponse
                 {
@@ -134,7 +191,64 @@ namespace SolidworksExecution.Services
             finally
             {
                 if (tmpBmp != null) try { File.Delete(tmpBmp); } catch { }
+                if (_isolated != null) try { RestoreHidden(_solidWorks.IActiveDoc2 as IModelDoc2); } catch { }
             }
+        }
+
+        private IAssemblyDoc _isolated;
+
+        // SolidWorks' own Isolate command on the selected components (IAssemblyDoc.Isolate, a
+        // temporary view mode left with ExitIsolate). Setting IComponent2.Visible per component did
+        // not show in the capture (and took 83 s for ~850 leaves).
+        private bool IsolateComponents(IAssemblyDoc asm, List<IComponent2> comps)
+        {
+            var doc = asm as IModelDoc2;
+            doc.ClearSelection2(true);
+            foreach (var c in comps) try { c.Select4(true, null, false); } catch { }
+            bool ok = false;
+            try { asm.SetIsolateVisibility(0 /* hidden */); } catch { }
+            try { ok = asm.Isolate(); } catch { }
+            doc.ClearSelection2(true);
+            if (ok) _isolated = asm;
+            return ok;
+        }
+
+        private void RestoreHidden(IModelDoc2 doc)
+        {
+            var asm = _isolated;
+            _isolated = null;
+            if (asm == null) return;
+            try { asm.ExitIsolate(); } catch { }
+            try { (asm as IModelDoc2)?.GraphicsRedraw2(); } catch { }
+        }
+
+        // ViewZoomTo2 takes the zoom rectangle in VIEW coordinates (the screen-aligned frame of
+        // IModelView.Orientation3), not the corners of a model-space box: passing a box's min / max
+        // corners framed another region in an isometric view (found 2026-11-13 by comparing with
+        // ViewZoomToSelection on the same component; only view coordinates matched). Project the 8
+        // corners into the view frame (row vectors, v = p * R), take their 2D extent plus the margin.
+        private static void ZoomToModelBox(IModelDoc2 doc, double[] b, double margin)
+        {
+            var view = doc.ActiveView as IModelView;
+            var ori = view?.Orientation3 as MathTransform;
+            var a = ori?.ArrayData as double[];
+            if (a == null || a.Length < 9)
+            {
+                doc.ViewZoomTo2(b[0], b[1], b[2], b[3], b[4], b[5]);
+                return;
+            }
+            double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue, sumZ = 0;
+            for (int m = 0; m < 8; m++)
+            {
+                double x = (m & 1) == 0 ? b[0] : b[3], y = (m & 2) == 0 ? b[1] : b[4], z = (m & 4) == 0 ? b[2] : b[5];
+                double vx = x * a[0] + y * a[3] + z * a[6];
+                double vy = x * a[1] + y * a[4] + z * a[7];
+                sumZ += x * a[2] + y * a[5] + z * a[8];
+                minX = Math.Min(minX, vx); maxX = Math.Max(maxX, vx);
+                minY = Math.Min(minY, vy); maxY = Math.Max(maxY, vy);
+            }
+            double zc = sumZ / 8, mx = (maxX - minX) * margin, my = (maxY - minY) * margin;
+            doc.ViewZoomTo2(minX - mx, minY - my, zc, maxX + mx, maxY + my, zc);
         }
 
         // The screenshot, with the caption's lines (split on '\n') in a white band below it.

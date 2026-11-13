@@ -95,7 +95,7 @@ LONG_TOOLS = {
     "set_component_state", "import_step", "measure_curves", "manage_configurations",
     "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
     "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
-    "replace_component", "insert_part", "edit_bodies",
+    "replace_component", "insert_part", "edit_bodies", "check_path_clearance",
 }
 
 
@@ -332,23 +332,31 @@ def check_rebuild(
     recursive: bool = True,
     include_warnings: bool = True,
     resolve_lightweight: bool = False,
+    force: bool = False,
+    verbose: bool = False,
 ) -> str:
     """SolidWorks' "What's Wrong" list for the active document (does NOT change state_version;
-    never saves). rebuild=True force-rebuilds the active document first, so the list is current.
+    never saves). rebuild=True rebuilds what is out of date first (EditRebuild3), so the list is
+    current. force=True rebuilds every feature on every level (ForceRebuild3): on a large assembly
+    that marks every loaded reference modified, and the next save rewrites them all with no change;
+    use it only when a plain rebuild leaves stale results.
     In an assembly with recursive=True, every loaded sub-assembly and part document is checked too
     (each distinct file once, with `first_instance` = one instance path that uses it).
     Each problem gives severity (error / warning), the feature or mate name and type, the
     swFeatureError_e code and its meaning, and for a mate `mate_components`: the instance path of
     each component it references (null = that reference is gone). `components_not_loaded` lists
-    unsuppressed components whose file could not be loaded, with a reason (lightweight /
-    not loaded / file missing). Lightweight components are not checked (no model loaded):
+    unsuppressed components whose file could not be loaded, as counts per reason (lightweight /
+    not loaded / file missing), plus `components_not_loaded_list` for the missing / not-loaded
+    ones (verbose=True lists the lightweight ones too: ~240 kB on 1000 components). Lightweight
+    components are not checked (no model loaded):
     resolve_lightweight=True resolves every lightweight component first (slow on a large assembly;
     reported as lightweight_resolved). `clean` is true when nothing is wrong and every component
     was checked. Run it after every structural change (deleted features, moved or replaced
     components) and before saving an assembly."""
     return _call("check_rebuild", {"rebuild": rebuild, "recursive": recursive,
                                    "include_warnings": include_warnings,
-                                   "resolve_lightweight": resolve_lightweight})
+                                   "resolve_lightweight": resolve_lightweight,
+                                   "force": force, "verbose": verbose})
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +373,7 @@ def check_interference(
     limit: Annotated[int, Field(ge=1)] = 100,
     compact: bool = False,
     ignore_same_parent: bool = False,
+    boxes: bool = False,
 ) -> str:
     """Interference detection in the ACTIVE assembly (read-only: does NOT change state_version,
     never saves).
@@ -391,13 +400,16 @@ def check_interference(
     solid bodies (e.g. a SOLIDWORKS Routing tube, one body per segment) is measured body to body.
     ignore_same_parent: leave out interferences and clearance violations whose components all
     sit in the same sub-assembly (e.g. a harness's own bundles meeting at their split points);
-    reported as ignored_same_parent."""
+    reported as ignored_same_parent. boxes=True: `neighbours` as [{component, box_mm}] (world
+    bounding boxes, mm: rough keep-out zones when looking for free space).
+    To test a path BEFORE drawing it, use check_path_clearance."""
     return _call("check_interference", {
         "components": components, "clearance": clearance,
         "treat_coincidence_as_interference": treat_coincidence_as_interference,
         "treat_subassemblies_as_components": treat_subassemblies_as_components,
         "include_hidden": include_hidden, "resolve_lightweight": resolve_lightweight,
-        "limit": limit, "compact": compact, "ignore_same_parent": ignore_same_parent})
+        "limit": limit, "compact": compact, "ignore_same_parent": ignore_same_parent,
+        "boxes": boxes})
 
 
 # ---------------------------------------------------------------------------
@@ -409,8 +421,10 @@ def component_status(
     match: str = "",
     state: str = "",
     recursive: bool = True,
-    include_mates: bool | None = None,
+    include_mates: bool = False,
     limit: int = 500,
+    boxes: bool = False,
+    time_budget_s: Annotated[float, Field(ge=0)] = 60.0,
 ) -> str:
     """Read-only status of the active assembly's components (does NOT change state_version).
     components: JSON list of component names or instance paths ("Sub-1/Part-1", nested ones
@@ -419,20 +433,23 @@ def component_status(
     'resolved', 'hidden' or 'missing' = file not found). Each entry: component (instance path),
     suppression (suppressed / lightweight / resolved / fully_resolved), file, file_missing,
     configuration, hidden, fixed, envelope, parent_suppressed (a suppressed sub-assembly holding it),
-    excluded_from_bom, transform (13 numbers, m), and with include_mates (default: on when the list is
-    named or filtered) its mates: name, type, suppressed, severity / code / meaning when the mate has a
-    rebuild error, and the instance paths of the components it references (null = reference gone);
-    broken_mates counts the errors. counts_by_state summarizes a full listing. Use it to find
+    excluded_from_bom, transform (13 numbers, m), with boxes=True box_mm (world bounding box, mm),
+    and with include_mates=True its mates: name, type, suppressed, severity / code / meaning when the
+    mate has a rebuild error, and the instance paths of the components it references (null =
+    reference gone); broken_mates counts the errors. The mate scan reads every mate of the assembly
+    and of each parent sub-assembly per component: minutes on a large assembly, so it is off by
+    default. time_budget_s (0 = none) stops the listing and the mate scans after that many seconds
+    and returns what it has with truncated=true (a named-component mate scan once held SolidWorks
+    for 25 minutes; nothing can cancel a running call). counts_by_state summarizes a full listing. Use it to find
     suppressed parts and what they are mated to before set_component_state.
     Limits: from the top assembly, mates are found reliably only when held by the ACTIVE
     assembly (e.g. top-level mates to nested parts); to see the mates a sub-assembly holds, open
     that sub-assembly and run component_status there. `fixed` is reliable for components of the
     active assembly itself (open the sub-assembly for its own components)."""
-    params: dict = {"components": components, "match": match, "state": state,
-                    "recursive": recursive, "limit": limit}
-    if include_mates is not None:
-        params["include_mates"] = include_mates
-    return _call("component_status", params)
+    return _call("component_status", {
+        "components": components, "match": match, "state": state, "recursive": recursive,
+        "limit": limit, "include_mates": include_mates, "boxes": boxes,
+        "time_budget_s": time_budget_s})
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +461,8 @@ def set_component_state(
     suppression: str = "",
     visible: bool | None = None,
     referenced_configuration: str = "",
-    include_mates: bool = True,
+    include_mates: bool = False,
+    time_budget_s: Annotated[float, Field(ge=0)] = 60.0,
 ) -> str:
     """Suppresses, resolves (unsuppresses) or makes lightweight components of the active assembly,
     shows or hides them, and / or sets which configuration of their file they use
@@ -457,13 +475,12 @@ def set_component_state(
     a suppressed sub-assembly fails until that sub-assembly is resolved (resolve the parent first).
     Changing a nested component edits its sub-assembly's active configuration, so that
     sub-assembly file is modified too: work on local copies only. Rebuilds, then returns per
-    component the change result (ok / failed / bad_state) and its status after the rebuild with its
-    mates and their errors (as component_status). Run check_rebuild before saving.
-    include_mates=False leaves the mates out of that report: on an assembly of ~1000 components
-    the mate scan takes minutes per component (e.g. switching many instances to another
-    configuration)."""
+    component the change result (ok / failed / bad_state) and its status after the rebuild (as
+    component_status). Run check_rebuild before saving: it reports broken mates of the whole tree.
+    include_mates=True adds each component's mates to that report: on an assembly of ~1000
+    components the mate scan takes minutes per component, bounded by time_budget_s."""
     params: dict = {"components": components, "suppression": suppression,
-                    "include_mates": include_mates}
+                    "include_mates": include_mates, "time_budget_s": time_budget_s}
     if visible is not None:
         params["visible"] = visible
     if referenced_configuration:
@@ -1278,6 +1295,8 @@ def save_document(
     save_references: bool = True,
     reference_root: str = "",
     force: bool = False,
+    documents: str = "[]",
+    verbose: bool = False,
 ) -> str:
     """Save the active SolidWorks document to disk.
     file_path: full output path including the document extension
@@ -1294,9 +1313,17 @@ def save_document(
     An in-place save of a document SOLIDWORKS does not mark as modified writes nothing
     (unchanged=true; the file would otherwise show as changed in version control); force=True
     writes it anyway.
-    Returns the saved path, then JSON {saved, unchanged, saved_references, skipped_references,
-    unsaved_open_documents}: documents still modified in the session (e.g. a top assembly
-    whose components were resolved by checks): save or knowingly leave them, never ignore.
+    documents: JSON list of open documents (full paths, titles or file names) to save INSTEAD:
+    exactly those, parts before assemblies, nothing else (not the active document unless listed,
+    not the other modified references; unmodified ones are skipped unless force). Use it when a
+    rebuild or a check marked many references modified that the task did not change (a forced
+    rebuild of a large assembly made one save rewrite ~140 unchanged files). Returns {saved,
+    skipped [{file, reason}], not_open, unsaved_open_documents (count), unsaved_open_documents_list}.
+    Returns the saved path, then JSON {saved, unchanged, saved_references (count),
+    saved_references_list, skipped_references, unsaved_open_documents (count),
+    unsaved_open_documents_list}: lists of more than 20 are cut to 20 unless verbose=True. Documents
+    still modified in the session (e.g. a top assembly whose components were resolved by checks):
+    save or knowingly leave them, never ignore.
     assembly_as_part (active ASSEMBLY, file_path ending .sldprt): save a COPY of the assembly as
     one part (the assembly stays active and unchanged): 'exterior_components' = solid bodies of
     the components visible from outside (light and still solid: suppress internal components
@@ -1305,7 +1332,7 @@ def save_document(
     cannot use them). Returns saved_part and its size."""
     return _call("save_document", {"file_path": file_path, "assembly_as_part": assembly_as_part,
                                    "save_references": save_references,
-                                   "reference_root": reference_root, "force": force})
+                                   "reference_root": reference_root, "force": force, "documents": documents, "verbose": verbose})
 
 
 # ---------------------------------------------------------------------------
@@ -1499,10 +1526,11 @@ def sweep_circular(
 # its cut length. routing_status reads everything back.
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
-def routing_status(route: str = "") -> str:
+def routing_status(route: str = "", verbose: bool = False) -> str:
     """Read SOLIDWORKS Routing state (read-only, does NOT change state_version).
-    Always: whether the Routing add-in is loaded, its library file locations and the from-to
-    header definitions (an EMPTY one makes every from-to import fail).
+    Always: whether the Routing add-in is loaded and its cable / component library files;
+    verbose=True: every library file location and the from-to header definitions (an EMPTY one
+    makes every from-to import fail).
     Active PART: its routing points (ConnectionPoint / RoutePoint features) and Routing
     component type (2 = connector, 14 = clip, 27 = splice; route type 3 = electrical).
     Active ASSEMBLY: route_assemblies (the route sub-assemblies, e.g. 'Harness_1-<top>-1') and,
@@ -1510,7 +1538,7 @@ def routing_status(route: str = "") -> str:
     segments they run through, errors such as not_routed / violates_bend_radius, wire part
     number, colour, diameter_mm) and segments (id, length_mm, bend_radius_mm,
     bundle_diameter_mm)."""
-    return _call("routing_status", {"route": route})
+    return _call("routing_status", {"route": route, "verbose": verbose})
 
 
 @mcp.tool(structured_output=False)
@@ -1524,12 +1552,23 @@ def add_routing_point(
     stub_length: Annotated[float, Field(ge=0)] = 0.0,
     sub_type: int = 2,
     reverse: bool = False,
+    direction: str = "",
+    exit_depth: Annotated[float, Field(ge=0)] = 0.001,
+    verbose: bool = False,
 ) -> str:
     """Make the ACTIVE PART a SOLIDWORKS Routing component (local CAD copies only: it edits
     the part; save it with save_document). Bumps state_version.
     kind='connection': a connection point (CPoint, electrical) where the cable leaves the part:
         face_index = the face the cable exits through (analyze_model(faces)), point = JSON
         '[x, y, z]' in METERS, part coordinates, on that face (usually the cable exit centre).
+        direction = JSON '[dx, dy, dz]' (part coordinates) INSTEAD of face_index: the cable exit is
+        a planar face whose outward normal is that direction, within exit_depth (m, default 1 mm)
+        of the outermost such face (terminal tips often stand a fraction of a mm proud of the
+        housing): the one nearest to point (projected) when given, else the largest; the point
+        goes onto it (its centre without point). The result's exit_face gives the face, its height,
+        the candidates and body_extent_beyond_mm (solid reaching beyond the face, box estimate). A
+        point picked by hand once sat on an internal face, so every route ended 8.7 mm inside the
+        plug.
         The route leaves along the face normal; reverse=True flips it. stub_length (m) = the
         straight stub every route starts with (default SOLIDWORKS'), diameter (m) = nominal
         bundle diameter. sub_type: swElectricalConnectionPointType_e (2 = cable/wire, default).
@@ -1538,11 +1577,13 @@ def add_routing_point(
     kind='none': only set component_type.
     component_type: 'connector' for harness plugs, 'clip' for tie mounts / clips.
     name: names the new feature (its point sketch becomes <name>_Sketch).
-    Returns the feature created, its type, the part's routing points and component type."""
+    Returns the feature created, its type, the part's routing points and component type
+    (verbose=True: also every routing library location, as routing_status)."""
     return _call("add_routing_point", {
         "kind": kind, "face_index": face_index, "point": point, "name": name,
         "component_type": component_type, "diameter": diameter, "stub_length": stub_length,
-        "sub_type": sub_type, "reverse": reverse})
+        "sub_type": sub_type, "reverse": reverse, "direction": direction,
+        "exit_depth": exit_depth, "verbose": verbose})
 
 
 @mcp.tool(structured_output=False)
@@ -1559,6 +1600,8 @@ def import_from_to(
     press_ok: Annotated[int, Field(ge=0, le=10)] = 3,
     route: str = "",
     edit_route_first: bool = False,
+    replaces: str = "",
+    configurations: str = "[]",
 ) -> str:
     """Import wires from a from-to list into the ACTIVE ASSEMBLY (SOLIDWORKS Routing
     'Start by From/To', IRouteManager.ImportFromToList). Bumps state_version.
@@ -1583,13 +1626,22 @@ def import_from_to(
     geometry; leave it False and draw the real bundle paths with route_path instead.
     route_wires: route the wires through the route geometry and report them (cut lengths).
     route / edit_route_first: only for a route that is not created by this import.
+    replaces: a route sub-assembly this import replaces (redrawing a harness): it is deleted
+        before the import and its Harness_<n> files (.SLDASM, -fromToList.xml, -segmentList.xml)
+        after it (deleted_files). Must be resolved in the active configuration.
+    configurations: JSON list of configurations of the active assembly that show the new route;
+        the first is activated for the import, and the new route is suppressed in every other
+        configuration (suppressed_in): a component added in one configuration shows in all.
+    The assembly is rebuilt out-of-date-only afterwards (no ForceRebuild3: that marked every
+    loaded reference modified).
     Returns imported, new_route, the route's wires and segments (see routing_status), steps."""
     return _call("import_from_to", {
         "from_to": from_to, "cable_library": cable_library, "component_library": component_library,
         "references": references, "convert_guidelines": convert_guidelines,
         "route_wires": route_wires, "use_existing_assembly": use_existing_assembly,
         "overwrite": overwrite, "search_sub_assemblies": search_sub_assemblies,
-        "press_ok": press_ok, "route": route, "edit_route_first": edit_route_first})
+        "press_ok": press_ok, "route": route, "edit_route_first": edit_route_first,
+        "replaces": replaces, "configurations": configurations})
 
 
 @mcp.tool(structured_output=False)
@@ -1603,6 +1655,10 @@ def route_path(
     route_wires: bool = True,
     snap_tolerance: Annotated[float, Field(ge=0)] = 0.0005,
     merge_tolerance: Annotated[float, Field(ge=0)] = 1e-5,
+    dry_run: bool = False,
+    allow_free_ends: bool = False,
+    free_end_tolerance: Annotated[float, Field(ge=0)] = 0.02,
+    min_corner_deg: Annotated[float, Field(ge=0, le=90)] = 10.0,
 ) -> str:
     """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one call per
     bundle). Bumps state_version. To redraw a bundle, delete the route
@@ -1626,12 +1682,65 @@ def route_path(
         bundles are added, which would leave a gap at a breakout). 0 = off.
     merge_tolerance (m): coincident points are merged within this distance on every call; a
         call with points='[]' merges an existing gap.
+    Checks before drawing (nothing is drawn when one fails):
+    - END_NOT_ON_ROUTE: an end that does not snap but lies within free_end_tolerance (m) of a
+      route point. Typical cause: a branch started at a corner of an earlier call, whose fillet
+      removed that vertex (3.9 mm off); its wires stay unrouted. Put branch nodes on straight legs,
+      at least r*tan(deflection/2) from a corner. allow_free_ends=True draws anyway.
+    - Corners deflecting less than min_corner_deg are drawn sharp (warning): a filleted 4 deg
+      corner split a route into disconnected segments.
+    dry_run=True: snap and check, then return the points as they would be drawn and their
+    geometry (length_mm, per corner deflection / radius / tangent, per leg length and straight
+    rest, min_straight_mm < 0 = radii too big) without drawing. It reads the route sketch without
+    entering route edit (leaving route edit rewrites the route's segmentList.xml): nothing changes.
+    Wire length = the route segments it runs through + both stubs: add a dry run's length_mm to
+    the existing segments to predict it before drawing.
     Returns the route sketch (segments, total length_mm, open_ends), drawn_length_mm, and after
     exit the wires and segments; steps say whether each end snapped onto the route."""
     return _call("route_path", {
         "route": route, "points": points, "bend_radius": bend_radius, "bend_radii": bend_radii,
         "add_cpoints": add_cpoints, "exit_route": exit_route, "route_wires": route_wires,
-        "snap_tolerance": snap_tolerance, "merge_tolerance": merge_tolerance})
+        "snap_tolerance": snap_tolerance, "merge_tolerance": merge_tolerance,
+        "dry_run": dry_run, "allow_free_ends": allow_free_ends,
+        "free_end_tolerance": free_end_tolerance, "min_corner_deg": min_corner_deg})
+
+
+@mcp.tool(structured_output=False)
+def check_path_clearance(
+    points: str = "[]",
+    diameter: Annotated[float, Field(ge=0)] = 0.0,
+    bend_radius: Annotated[float, Field(ge=0)] = 0.0,
+    bend_radii: str = "[]",
+    paths: str = "[]",
+    clearance: Annotated[float, Field(ge=0)] = 0.0,
+    ignore: str = "[]",
+    include_hidden: bool = False,
+    ignore_same_parent: bool = False,
+    limit: Annotated[int, Field(ge=1)] = 50,
+    keep_probe: bool = False,
+) -> str:
+    """Is a candidate bundle path free in the ACTIVE ASSEMBLY, before any route or bundle part is
+    drawn on it? Read-only for the model: builds the path as a circular-profile tube (same
+    filleted polyline as create_3d_path / route_path) in a temporary part, inserts it at the
+    assembly origin, runs check_interference on it, then deletes the component and the file
+    (the assembly is left marked modified, geometry unchanged). Seconds instead of an import +
+    draw + rebuild + check per candidate.
+    points: JSON [[x,y,z], ...] in METERS, assembly coordinates; diameter (m): the bundle's;
+    bend_radius / bend_radii (m) as in route_path. paths: JSON list of {points, bend_radii,
+    bend_radius, diameter} to check a trunk and its branches together (instead of points).
+    clearance (m): also report neighbours closer than this (slower: one Measure per neighbour).
+    ignore: JSON list of name fragments to leave out (e.g. the connectors the path ends in, which
+    it touches by design).
+    Returns interference_count and interferences (largest first): component, volume_mm3, box_mm,
+    and where on the path: path (when several), leg (points k -> k+1), at_mm_along_path,
+    near_corner. clearance_violations, nearest_mm, path_length_mm, `clear`.
+    keep_probe=True leaves the tube in the assembly (probe_component) to look at; delete it with
+    edit_feature or close without saving."""
+    return _call("check_path_clearance", {
+        "points": points, "diameter": diameter, "bend_radius": bend_radius,
+        "bend_radii": bend_radii, "paths": paths, "clearance": clearance, "ignore": ignore,
+        "include_hidden": include_hidden, "ignore_same_parent": ignore_same_parent,
+        "limit": limit, "keep_probe": keep_probe})
 
 
 @mcp.tool(structured_output=False)
@@ -1671,6 +1780,9 @@ def screenshot(
     height: Annotated[int, Field(ge=0, le=8000)] = 0,
     caption: str = "",
     zoom_box: str = "",
+    focus: str = "[]",
+    isolate: bool = False,
+    margin: Annotated[float, Field(ge=0, le=2)] = 0.1,
 ) -> str:
     """Save the active document's graphics view as a PNG image (does NOT change state).
     Captures what the SolidWorks window shows (IModelDoc2.SaveBMP); the document file itself is
@@ -1680,14 +1792,22 @@ def screenshot(
     width / height: image size in pixels; 0 = the window's size.
     caption: optional text drawn in a white band under the image, one line per '\\n'; the first
         line is bold (e.g. the part name, then its measurements from measure_curves).
-    zoom_box: JSON '[x1, y1, z1, x2, y2, z2]' in METERS, model coordinates: zoom on that region
-        (IModelDoc2.ViewZoomTo2, after the view orientation) instead of fitting the whole model,
-        e.g. to look at one connector area of a large assembly.
+    zoom_box: JSON '[x1, y1, z1, x2, y2, z2]' in METERS, model coordinates: zoom on that 3D box
+        (projected into the chosen view, plus `margin` x its size on each side) instead of fitting
+        the whole model, e.g. to look at one connector area of a large assembly.
+    focus: JSON list of component names or instance paths (active assembly): zoom on them
+        (SolidWorks' zoom to selection; margin does not apply). isolate=True shows only them for the
+        capture (SolidWorks' Isolate, left with ExitIsolate afterwards; the display state is not
+        changed). Returns focus_box_mm (their world bounding box).
     The document's window must be visible: activate_document it first."""
     params: dict = {"file_path": file_path, "view": view, "zoom_to_fit": zoom_to_fit,
                     "width": width, "height": height, "caption": caption}
     if zoom_box:
         params["zoom_box"] = json.loads(zoom_box)
+    if focus and focus.strip() != "[]":
+        params["focus"] = focus
+        params["isolate"] = isolate
+    params["margin"] = margin
     return _call("screenshot", params)
 
 

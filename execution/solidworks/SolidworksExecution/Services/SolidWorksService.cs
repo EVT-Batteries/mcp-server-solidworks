@@ -733,6 +733,82 @@ namespace SolidworksExecution.Services
                     return r0;
                 }
 
+                bool verbose = p?.Value<bool?>("verbose") ?? false;
+
+                // documents: save exactly these open documents (full paths or titles), parts before
+                // assemblies, and nothing else - not the active document unless it is listed, not
+                // the other modified references. For when a rebuild or a check marked many
+                // references modified that the task did not mean to change.
+                var only = ParseNameList(p?["documents"]);
+                if (only.Count > 0)
+                {
+                    bool forceOnly = p?.Value<bool?>("force") ?? false;
+                    var open = new List<IModelDoc2>();
+                    if (_solidWorks.GetDocuments() is object[] all)
+                        foreach (var o in all) if (o is IModelDoc2 d) open.Add(d);
+                    var savedOnly = new JArray();
+                    var skippedOnly = new JArray();
+                    var missingOnly = new JArray();
+                    var picked = new List<IModelDoc2>();
+                    foreach (var n in only)
+                    {
+                        string nn = n.Trim();
+                        var d = open.FirstOrDefault(x =>
+                            string.Equals(NormalizePath(x.GetPathName() ?? ""), NormalizePath(nn), StringComparison.OrdinalIgnoreCase))
+                            ?? open.FirstOrDefault(x => string.Equals(x.GetTitle(), nn, StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(System.IO.Path.GetFileNameWithoutExtension(x.GetPathName() ?? ""), nn, StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(System.IO.Path.GetFileName(x.GetPathName() ?? ""), nn, StringComparison.OrdinalIgnoreCase));
+                        if (d == null) { missingOnly.Add(nn); continue; }
+                        if (!picked.Contains(d)) picked.Add(d);
+                    }
+                    foreach (var d in picked.OrderBy(d => d is IAssemblyDoc ? 1 : 0))
+                    {
+                        string dp = d.GetPathName();
+                        if (string.IsNullOrEmpty(dp)) { skippedOnly.Add(new JObject { ["file"] = d.GetTitle(), ["reason"] = "never saved: save it with file_path" }); continue; }
+                        string why = SaveBlockReason(dp, null);
+                        if (why != null) { skippedOnly.Add(new JObject { ["file"] = dp, ["reason"] = why }); continue; }
+                        bool dirtyD = true;
+                        try { dirtyD = d.GetSaveFlag(); } catch { }
+                        if (!dirtyD && !forceOnly) { skippedOnly.Add(new JObject { ["file"] = dp, ["reason"] = "unmodified (force=true writes it)" }); continue; }
+                        int e1 = 0, w1 = 0;
+                        if (d.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref e1, ref w1)) savedOnly.Add(dp);
+                        else skippedOnly.Add(new JObject { ["file"] = dp, ["reason"] = $"save failed (errors {e1}, warnings {w1})" });
+                    }
+                    if (picked.Count == 0)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "DOCUMENT_NOT_OPEN", "None of the listed documents is open: " + string.Join(", ", missingOnly)
+                            + ". Name them by full path, title or file name.");
+                    var stillDirtyOnly = DirtyOpenDocuments().Select(d =>
+                        string.IsNullOrEmpty(d.GetPathName()) ? d.GetTitle() : d.GetPathName()).ToList();
+                    var rep = new JObject
+                    {
+                        ["saved"] = savedOnly,
+                        ["skipped"] = skippedOnly,
+                        ["unsaved_open_documents"] = stillDirtyOnly.Count,
+                    };
+                    if (missingOnly.Count > 0) rep["not_open"] = missingOnly;
+                    if (verbose || stillDirtyOnly.Count <= 20) rep["unsaved_open_documents_list"] = new JArray(stillDirtyOnly);
+                    var rOnly = new ExecutionResponse
+                    {
+                        OperationId = request.OperationId,
+                        Status = "COMPLETED",
+                        Verified = true,
+                        StateVersion = _guard.GetCurrentStateVersion(),
+                        CadState = new CadState
+                        {
+                            StateVersion = _guard.GetCurrentStateVersion(),
+                            ActiveDocument = modelDoc.GetTitle(),
+                            DocumentType = modelDoc is IDrawingDoc ? "DRAWING" : (modelDoc is IAssemblyDoc ? "ASSEMBLY" : "PART"),
+                            ActiveSketch = null,
+                            Features = new List<string> { rep.ToString(Newtonsoft.Json.Formatting.None) },
+                            Dimensions = new List<string>()
+                        },
+                        Error = null
+                    };
+                    _guard.RegisterCompleted(request.OperationId, rOnly);
+                    return rOnly;
+                }
+
                 // Modified references of an assembly (route sub-assemblies and connector parts after
                 // a from-to import, components rebuilt or resolved by checks) are NOT written by
                 // Save3 of the assembly alone: save them first, children before the assembly.
@@ -816,14 +892,25 @@ namespace SolidworksExecution.Services
                 // Everything still modified in the session: nothing is left behind silently.
                 var stillDirty = new JArray(DirtyOpenDocuments().Select(d =>
                     string.IsNullOrEmpty(d.GetPathName()) ? d.GetTitle() : d.GetPathName()));
+                // Lists only when short or asked for: after a full rebuild an assembly save wrote
+                // ~140 references, and the paths alone ran to ~15 kB per call.
+                const int ListMax = 20;
                 var report = new JObject
                 {
                     ["saved"] = savedPath,
                     ["unchanged"] = unchanged,
-                    ["saved_references"] = savedRefs,
+                    ["saved_references"] = savedRefs.Count,
                     ["skipped_references"] = skippedRefs,
-                    ["unsaved_open_documents"] = stillDirty
+                    ["unsaved_open_documents"] = stillDirty.Count,
                 };
+                if (verbose || savedRefs.Count <= ListMax) report["saved_references_list"] = savedRefs;
+                else
+                {
+                    report["saved_references_list"] = new JArray(savedRefs.Take(ListMax));
+                    report["saved_references_note"] = $"first {ListMax} of {savedRefs.Count}; verbose=true lists all. Many saved references usually mean a forced rebuild marked them modified: save chosen files with documents=[...] next time.";
+                }
+                if (verbose || stillDirty.Count <= ListMax) report["unsaved_open_documents_list"] = stillDirty;
+                else report["unsaved_open_documents_list"] = new JArray(stillDirty.Take(ListMax));
                 var response = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
