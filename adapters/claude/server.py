@@ -1623,10 +1623,15 @@ def connector_cavities(
     up: JSON [x, y, z], the 'up' of the view (e.g. the latch side, as the datasheet's cavity
         numbering view shows it); default: the part axis least aligned with direction.
     numbering: JSON {"first": "top_left"|"top_right"|"bottom_left"|"bottom_right", "along":
-        "row"|"column", "start": 1}: pin `start` at that corner of the grid as seen from the wire
-        side, counting along rows (or columns) over every grid position. Take it from the
+        "row"|"column", "start": 1, "count": "grid"|"cavities"}: pin `start` at that corner of
+        the grid as seen from the wire side, counting along rows (or columns) over every grid
+        position (count 'grid': a missing cavity skips a number) or over the cavities only
+        ('cavities': staggered rows, where each cavity has a column of its own). Snake or
+        counter-clockwise schemes (e.g. 1-3 down one column, 4-6 up the next) are not
+        generated: pass add_connector_pins the pins in the datasheet's order. Take it from the
         datasheet's numbering view and confirm it on moulded cavity numbers when the model has
-        them. Without it, cavities only carry row / col.
+        them; a view drawn from the mating face must be mirrored. Without it, cavities only
+        carry row / col.
     exit_depth (m): faces within this of the outermost one along direction are searched too.
     min_size (m): openings smaller than this in either direction are not cavities (moulded
         text, marks). The cavities are the openings of the most common size (within
@@ -1751,9 +1756,11 @@ def route_path(
     free_end_tolerance: Annotated[float, Field(ge=0)] = 0.0005,
     min_corner_deg: Annotated[float, Field(ge=0, le=90)] = 10.0,
     wire_paths: str = "",
+    paths: str = "[]",
+    fan_out: str = "[]",
 ) -> str:
-    """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one call per
-    bundle). Bumps state_version. To redraw a bundle, delete the route
+    """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one bundle per
+    call with points, or many with paths / fan_out). Bumps state_version. To redraw a bundle, delete the route
     (edit_feature(action='delete') on its component) and import again.
     route: the route sub-assembly (routing_status route_assemblies / import_from_to new_route);
         ignored while a route is already being edited.
@@ -1764,6 +1771,16 @@ def route_path(
         bend_radius (m) or bend_radii (JSON, one per corner), as create_3d_path does.
     add_cpoints: JSON [[component, cpoint feature], ...] connectors to add to the route first
         (each gets its stub), e.g. '[["P2-1", "CPoint1"]]'.
+    paths: JSON [{"name"?, "points": [[x,y,z], ...], "bend_radii"?: [...] | "bend_radius"?: r}, ...]
+        more polylines drawn in the same route edit after points (a whole route in one call);
+        each end snaps onto the route or onto an end of an earlier polyline of the call.
+    fan_out: JSON [{"connector": instance, "join"?: [x,y,z], "join_distance"?: m, "pins"?: [...]}]
+        for connectors with one connection point per cavity (add_connector_pins): one straight
+        leg from each used cavity's stub end (the stubs the from-to import put on the route, or
+        the pins named) to a join node, drawn before points / paths so a branch can start on
+        it. join defaults to the mean stub end + join_distance (default 0.008) along the mean
+        exit direction. Returns fan_out [{connector, pins, join (m), join_mm, longest_leg_mm,
+        max_leg_angle_deg}]; a dry run returns the joins too.
     exit_route=False keeps the route open for the next bundle; the last call exits (True), and
         with route_wires routes the wires and returns them with cut lengths and errors
         (violates_bend_radius: SOLIDWORKS checks the innermost wire of the bundle, so a bend at
@@ -1794,8 +1811,9 @@ def route_path(
         connector or left unrouted, although its from-to data are right, takes the path of a
         twin wire between the same connectors, e.g. '{"W5": "W24"}'. On an existing route:
         route_path(route=..., points='[]', wire_paths=..., route_wires=False) applies only them.
-    Returns the route sketch (segments, total length_mm, open_ends), drawn_length_mm, and after
-    exit the wires and segments; steps say whether each end snapped onto the route."""
+    Returns the route sketch (segments, total length_mm, open_ends), drawn_length_mm (all
+    polylines; with several, paths lists each), and after exit the wires and segments; steps
+    say whether each end snapped onto the route."""
     params = {
         "route": route, "points": points, "bend_radius": bend_radius, "bend_radii": bend_radii,
         "add_cpoints": add_cpoints, "exit_route": exit_route, "route_wires": route_wires,
@@ -1804,6 +1822,10 @@ def route_path(
         "free_end_tolerance": free_end_tolerance, "min_corner_deg": min_corner_deg}
     if wire_paths and wire_paths.strip() not in ("", "{}"):
         params["wire_paths"] = wire_paths
+    if paths and paths.strip() not in ("", "[]"):
+        params["paths"] = paths
+    if fan_out and fan_out.strip() not in ("", "[]"):
+        params["fan_out"] = fan_out
     return _call("route_path", params)
 
 

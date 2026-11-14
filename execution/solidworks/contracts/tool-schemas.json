@@ -972,7 +972,7 @@
    "params": {
     "direction": "string (required - JSON [x,y,z], outward normal of the wire-exit face, part coordinates)",
     "up": "string (optional - JSON [x,y,z], the view's up, e.g. the latch side)",
-    "numbering": "string (optional - JSON {first: top_left|top_right|bottom_left|bottom_right, along: row|column, start: 1})",
+    "numbering": "string (optional - JSON {first: top_left|top_right|bottom_left|bottom_right, along: row|column, start: 1, count: grid|cavities})",
     "exit_depth": "number (optional, default 0.001 m - faces within this of the outermost are searched too)",
     "min_size": "number (optional, default 0.0005 m - smaller openings are not cavities)",
     "size_tolerance": "number (optional, default 0.2 - relative size match to the most common opening)",
@@ -1041,7 +1041,9 @@
     "allow_free_ends": "boolean (optional, default false - draw an end that sits on a corner a fillet removed)",
     "free_end_tolerance": "number (optional, meters, default 0.0005 - an unsnapped end this close to the tangent intersection of a route arc fails END_NOT_ON_ROUTE)",
     "min_corner_deg": "number (optional, degrees, default 10 - corners deflecting less are drawn sharp)",
-    "wire_paths": "string (optional - JSON {wire: [segment ids] | \"<other wire>\"}: IWire.SetRoutePathForWire on exit, after RouteWires; e.g. a wire attached to the wrong connector takes the path of its twin)"
+    "wire_paths": "string (optional - JSON {wire: [segment ids] | \"<other wire>\"}: IWire.SetRoutePathForWire on exit, after RouteWires; e.g. a wire attached to the wrong connector takes the path of its twin)",
+    "paths": "string (optional - JSON [{name?, points, bend_radii? | bend_radius?}]: more polylines drawn in the same route edit after points; each end snaps onto the route or an earlier polyline of the call)",
+    "fan_out": "string (optional - JSON [{connector, join?, join_distance?, pins?}]: one straight leg from each used cavity stub end of a per-cavity connector to a join node, drawn first; result fan_out [{connector, pins, join, join_mm, longest_leg_mm, max_leg_angle_deg}])"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, steps, warnings?}."

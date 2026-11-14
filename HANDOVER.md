@@ -144,10 +144,28 @@ back after a rebuild); SOLIDWORKS also sets `PortID` to the pin. A connection po
 points. The point may lie in a cavity opening (off the face material); the face only gives the
 direction.
 
-Ideas from this session (open):
+Session 4 (2026-11-14, a 40-wire, 8-connector harness in four configurations):
 
-- **Fan-out in one call:** `route_path(fan_out={join: [x,y,z], from: [[component, pin], ...]})`
-  drawing each cavity's stub end to the join node; today one call per wire.
+| Tool | Change | Tested |
+|---|---|---|
+| `route_path(paths=[...])` | several polylines `{name?, points, bend_radii / bend_radius}` in one route edit: all checked first (snap, fillet-corner ends, near-straight corners), then drawn; later ones snap onto the ends of earlier ones; `paths` in the result lists each with its length; `dry_run` accepts paths / fan_out alone | a whole route (13 bundles + 80 fan-out legs = 93 polylines) in one call per configuration, 40 wires routed, 0 errors, x4 |
+| `route_path(fan_out=[...])` | per connector `{connector, join? / join_distance?, pins?}`: one straight leg from each USED cavity's stub end (the stubs the from-to import put on the route, found by position; or the pins named) to the join node, drawn before `points` / `paths`; reports pins, join, longest leg, steepest leg angle | 8 connectors (2-22 used cavities) per route, legs 7-29 mm, steepest 50 deg |
+| `connector_cavities(numbering.count='cavities')` | numbers only the cavities in row / column order: staggered rows (each cavity its own grid column) | a 12-way staggered 2 x 6 housing numbered as its datasheet |
+| `add_connector_pins` | no longer warns "ModifyDefinition returned false" (always false; the pin ID read-back is the check) | |
+
+Lessons: the first leg out of a plug must hold the fan-out (join distance) plus the first bend's
+tangent (r tan(theta/2)); on short legs move the first bend out a few mm. A datasheet cavity
+view may be drawn from the mating face (mirror it), and some numbering is counter-clockwise
+(1-3 down one column, 4-6 up the other): give such pins to `add_connector_pins` explicitly.
+Seating a plug: compare the plug's shoulder distance (mating face to flange) with the header
+pocket depth and align the header pins with the plug's pin entries; a solid supplier mating face
+stops the plug at the pin tips, several mm short.
+
+Ideas (open):
+
+- **Fan-out end assignment for bundle lengths:** `routing_status` could return, per wire, the
+  length of its connector ends (stub + fan-out) apart from the shared segments; the bundle
+  mapping is a workspace script today.
 - **Coverings:** a SOLIDWORKS Routing covering (`ICovering`, covering library) on route
   segments, so the bundle OD and the sleeve's start / end offsets are in the model; today only
   `check_path_clearance(diameter=...)` uses the finished OD.

@@ -260,25 +260,33 @@ namespace SolidworksExecution.Services
                         var cu = cols.Select(g => g.Average(i => (double)cav[i]["u_mm"])).ToList();
                         result["column_pitch_mm"] = Math.Round(Math.Abs(cu.Last() - cu.First()) / (cols.Count - 1), 3);
                     }
+                    string count = (numbering?.Value<string>("count") ?? "grid").ToLowerInvariant();
                     if (cav.Count != rows.Count * cols.Count)
-                        warnings.Add($"{cav.Count} cavities in a {rows.Count} x {cols.Count} grid: staggered or missing positions (numbering counts every grid position)");
+                        warnings.Add($"{cav.Count} cavities in a {rows.Count} x {cols.Count} grid: staggered or missing positions"
+                            + (count.StartsWith("cav") ? "" : " (numbering counts every grid position; numbering.count='cavities' counts the cavities only, e.g. for staggered rows)"));
 
                     if (numbering != null)
                     {
                         // first: corner of pin `start` as seen from the wire side; along: 'row' (pins
-                        // run along a row, then the next row) or 'column'.
+                        // run along a row, then the next row) or 'column'; count: 'grid' (every grid
+                        // position takes a number, so a missing cavity skips one) or 'cavities' (only
+                        // the cavities, in that order: staggered rows).
                         string first = (numbering.Value<string>("first") ?? "top_left").ToLowerInvariant();
                         string along = (numbering.Value<string>("along") ?? "row").ToLowerInvariant();
                         int start = numbering.Value<int?>("start") ?? 1;
                         bool fromBottom = first.StartsWith("bottom"), fromRight = first.EndsWith("right");
                         int nr = rows.Count, nc = cols.Count;
+                        var keyed = new List<Tuple<int, JObject>>();
                         foreach (var c in cav)
                         {
                             int r = (int)c["row"] - 1, k = (int)c["col"] - 1;
                             if (fromBottom) r = nr - 1 - r;
                             if (fromRight) k = nc - 1 - k;
-                            c["pin"] = (start + (along.StartsWith("col") ? k * nr + r : r * nc + k)).ToString();
+                            keyed.Add(Tuple.Create(along.StartsWith("col") ? k * nr + r : r * nc + k, (JObject)c));
                         }
+                        int seq = 0;
+                        foreach (var kc in keyed.OrderBy(t => t.Item1))
+                            kc.Item2["pin"] = (start + (count.StartsWith("cav") ? seq++ : kc.Item1)).ToString();
                         result["numbering"] = numbering;
                     }
                 }
@@ -573,7 +581,9 @@ namespace SolidworksExecution.Services
                     {
                         var def = cpFeat.GetDefinition() as IConnectionPointFeatureData;
                         def.ElectricalPinID = w.pin;
-                        if (!cpFeat.ModifyDefinition(def, doc, null)) warnings.Add($"pin {w.pin}: ModifyDefinition returned false");
+                        // ModifyDefinition returns false here although the pin ID is stored: the
+                        // read-back below is the check.
+                        cpFeat.ModifyDefinition(def, doc, null);
                         var back = cpFeat.GetDefinition() as IConnectionPointFeatureData;
                         pj["pin_id"] = back?.ElectricalPinID ?? "";
                         if (back?.Direction is double[] dv2 && dv2.Length >= 3) pj["direction"] = J3(Unit(dv2), 6);

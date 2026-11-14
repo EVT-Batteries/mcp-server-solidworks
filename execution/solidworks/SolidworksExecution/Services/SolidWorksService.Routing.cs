@@ -996,9 +996,10 @@ namespace SolidworksExecution.Services
                 double freeTol = p?.Value<double?>("free_end_tolerance") ?? 0.0005;
                 double minCornerDeg = p?.Value<double?>("min_corner_deg") ?? 10.0;
                 bool enteredHere = false;
-                if (dryRun && (string.IsNullOrWhiteSpace(pointsJson) || pointsJson.Trim() == "[]"))
+                bool Given(string k) { string v = p?.Value<string>(k); return !string.IsNullOrWhiteSpace(v) && v.Trim() != "[]"; }
+                if (dryRun && !Given("points") && !Given("paths") && !Given("fan_out"))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "INVALID_PARAMETER", "dry_run needs points: the path to check.");
+                        "INVALID_PARAMETER", "dry_run needs points, paths or fan_out: the geometry to check.");
 
                 var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = doc as IAssemblyDoc;
@@ -1079,82 +1080,214 @@ namespace SolidworksExecution.Services
                 steps.Add("active sketch: " + (sk != null ? ((sk as IFeature)?.Name ?? "(route sketch)") : "none"));
 
                 double expected = -1;
+                JArray drawnPaths = null;
+                var fanReport = new JArray();
                 double snapTol = p?.Value<double?>("snap_tolerance") ?? 0.0005;
                 double mergeTol = p?.Value<double?>("merge_tolerance") ?? 1e-5;
-                if (!string.IsNullOrWhiteSpace(pointsJson) && pointsJson.Trim() != "[]")
+                // The polylines of this call: 'points' (one bundle), each of 'paths'
+                // [{name?, points, bend_radii | bend_radius}], and the fan-out legs of 'fan_out'
+                // [{connector, join?, join_distance?, pins?}]: one straight leg from each used
+                // cavity's stub end of a connector (one connection point per cavity) to a join node.
+                // Fan-out legs are drawn first, so a branch can start on a join node. Every polyline
+                // is checked before any is drawn; nothing is drawn when one fails.
+                var jobs = new List<Tuple<string, List<double[]>, double[]>>();
+                string pathsJson = p?.Value<string>("paths") ?? "";
+                string fanJson = p?.Value<string>("fan_out") ?? "";
+                bool hasPoints = !string.IsNullOrWhiteSpace(pointsJson) && pointsJson.Trim() != "[]";
+                bool hasPaths = !string.IsNullOrWhiteSpace(pathsJson) && pathsJson.Trim() != "[]";
+                bool hasFan = !string.IsNullOrWhiteSpace(fanJson) && fanJson.Trim() != "[]";
+                if ((hasPoints || hasPaths || hasFan) && sk == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "SKETCH_FAILED", "The route sketch is not active; cannot draw the path.");
+                string RadiiFor(string label, int nPts, string rJson, double rOne, out double[] rr)
                 {
-                    if (sk == null)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "SKETCH_FAILED", "The route sketch is not active; cannot draw the path.");
-                    List<double[]> pts;
-                    string perr = ParsePoints3D(pointsJson, out pts);
+                    rr = new double[Math.Max(0, nPts - 2)];
+                    for (int i = 0; i < rr.Length; i++) rr[i] = rOne;
+                    if (!string.IsNullOrWhiteSpace(rJson) && rJson.Trim() != "[]")
+                    {
+                        JArray ra;
+                        try { ra = JArray.Parse(rJson); } catch (Exception ex) { return label + ": bend_radii: " + ex.Message; }
+                        if (ra.Count != rr.Length)
+                            return $"{label}: bend_radii needs one radius per corner: {rr.Length} for {nPts} points.";
+                        for (int i = 0; i < rr.Length; i++) rr[i] = (double)ra[i];
+                    }
+                    return null;
+                }
+                if (hasPoints)
+                {
+                    string perr = ParsePoints3D(pointsJson, out List<double[]> pts0);
                     if (perr != null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", perr);
-                    // The route sketch is under-constrained: adding stubs or bundles lets the solver
-                    // move earlier geometry by a few um, so a bundle drawn to the coordinates an
-                    // earlier call returned no longer meets it (found 2026-11-12: a 7 um gap at a
-                    // breakout). Snap both ends to the nearest existing sketch point as it is NOW.
-                    var looseEnds = new List<string>();
-                    if (snapTol > 0)
+                    string rerr = RadiiFor("points", pts0.Count, p?.Value<string>("bend_radii"), bendRadius, out double[] r0);
+                    if (rerr != null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", rerr);
+                    jobs.Add(Tuple.Create("points", pts0, r0));
+                }
+                if (hasPaths)
+                {
+                    JArray pa;
+                    try { pa = JArray.Parse(pathsJson); }
+                    catch (Exception ex)
                     {
-                        var existing = SketchPointsOf(sk);
-                        var filletCorners = FilletCornersOf(sk);
-                        foreach (int end in new[] { 0, pts.Count - 1 })
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "paths must be a JSON list of {points, bend_radii | bend_radius}: " + ex.Message);
+                    }
+                    for (int k = 0; k < pa.Count; k++)
+                    {
+                        var po = pa[k] as JObject;
+                        string label = po?.Value<string>("name") ?? $"paths[{k}]";
+                        if (po?["points"] == null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", label + ": no points.");
+                        string perr = ParsePoints3D(po["points"].ToString(Newtonsoft.Json.Formatting.None), out List<double[]> pk);
+                        if (perr != null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", label + ": " + perr);
+                        string rerr = RadiiFor(label, pk.Count, po["bend_radii"]?.ToString(Newtonsoft.Json.Formatting.None),
+                            po.Value<double?>("bend_radius") ?? bendRadius, out double[] rk);
+                        if (rerr != null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", rerr);
+                        jobs.Add(Tuple.Create(label, pk, rk));
+                    }
+                }
+                if (hasFan)
+                {
+                    JArray fa;
+                    try { fa = JArray.Parse(fanJson); }
+                    catch (Exception ex)
+                    {
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "INVALID_PARAMETER", "fan_out must be a JSON list of {connector, join?, join_distance?, pins?}: " + ex.Message);
+                    }
+                    var routePts = SketchPointsOf(sk);
+                    double onRoute = Math.Max(snapTol, 2e-5);
+                    var fanJobs = new List<Tuple<string, List<double[]>, double[]>>();
+                    foreach (var fo in fa.OfType<JObject>())
+                    {
+                        string cn = fo.Value<string>("connector") ?? "";
+                        var c = FindComponentByName(asm, cn);
+                        if (c == null)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COMPONENT_NOT_FOUND",
+                                "fan_out: " + ComponentNotFoundMessage(asm, cn));
+                        var cw = ConnectorPointsWorld(c);
+                        var cps = cw?["connection_points"] as JArray;
+                        if (cps == null || cps.Count == 0)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "NO_CONNECTION_POINTS",
+                                $"fan_out: {cn} has no connection points" + (cw?["error"] != null ? $" ({cw["error"]})" : "") + ".");
+                        var wantPins = fo["pins"] is JArray wp ? new HashSet<string>(wp.Select(x => (string)x)) : null;
+                        // Used cavities: those whose stub end is a point of the route (the from-to
+                        // import draws a stub only for cavities that carry a wire), or the pins named.
+                        var ends = new List<double[]>(); var dirs = new List<double[]>(); var pins = new JArray();
+                        foreach (var cp in cps.OfType<JObject>())
                         {
-                            double best = double.MaxValue; double[] bp = null;
-                            foreach (var q in existing)
+                            if (!(cp["stub_end_mm"] is JArray se) || !(cp["direction"] is JArray dv)) continue;
+                            var e = new[] { (double)se[0] / 1000, (double)se[1] / 1000, (double)se[2] / 1000 };
+                            string pin = (string)cp["pin"];
+                            if (string.IsNullOrEmpty(pin)) pin = (string)cp["name"];
+                            double best = double.MaxValue; double[] bq = null;
+                            foreach (var q in routePts) { double[] dd = Sub(q, e); double d = Math.Sqrt(Dot(dd, dd)); if (d < best) { best = d; bq = q; } }
+                            bool use = wantPins != null ? wantPins.Contains(pin) : best <= onRoute;
+                            if (!use) continue;
+                            if (bq != null && best <= onRoute) e = bq;
+                            else warnings.Add($"fan_out {cn} pin {pin}: its stub end is not on the route (nearest point {Math.Round(best * 1000, 3)} mm): the leg starts there anyway");
+                            ends.Add(e); dirs.Add(new[] { (double)dv[0], (double)dv[1], (double)dv[2] }); pins.Add(pin);
+                        }
+                        if (ends.Count == 0)
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "NO_USED_CAVITIES",
+                                $"fan_out: no stub of {cn} is on the route (import the from-to list first, or name the pins).");
+                        double[] join;
+                        if (fo["join"] is JArray jj && jj.Count == 3) join = new[] { (double)jj[0], (double)jj[1], (double)jj[2] };
+                        else
+                        {
+                            double jd = fo.Value<double?>("join_distance") ?? 0.008;
+                            double[] m = { ends.Average(q => q[0]), ends.Average(q => q[1]), ends.Average(q => q[2]) };
+                            double[] dm = Unit(new[] { dirs.Average(q => q[0]), dirs.Average(q => q[1]), dirs.Average(q => q[2]) });
+                            join = Add(m, Scale(dm, jd));
+                        }
+                        double longest = 0, steepest = 0;
+                        for (int k = 0; k < ends.Count; k++)
+                        {
+                            double[] leg = Sub(join, ends[k]);
+                            double len = Math.Sqrt(Dot(leg, leg));
+                            if (len < 1e-6) continue; // the join is this stub end: no leg
+                            longest = Math.Max(longest, len);
+                            double ang = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(Unit(leg), Unit(dirs[k]))))) * 180 / Math.PI;
+                            steepest = Math.Max(steepest, ang);
+                            fanJobs.Add(Tuple.Create($"fan_out {cn} pin {pins[k]}", new List<double[]> { ends[k], join }, new double[0]));
+                        }
+                        fanReport.Add(new JObject
+                        {
+                            ["connector"] = ComponentPath(c),
+                            ["pins"] = pins,
+                            ["join"] = J3(join, 7),
+                            ["join_mm"] = J3(Scale(join, 1000), 3),
+                            ["longest_leg_mm"] = Math.Round(longest * 1000, 3),
+                            ["max_leg_angle_deg"] = Math.Round(steepest, 1),
+                        });
+                    }
+                    jobs.InsertRange(0, fanJobs);
+                }
+
+                if (jobs.Count > 0)
+                {
+                    // Snap both ends of each polyline onto the route as it is NOW (the route sketch is
+                    // under-constrained: adding stubs or bundles lets the solver move earlier geometry
+                    // by a few um, so a bundle drawn to the coordinates an earlier call returned no
+                    // longer meets it; found 2026-11-12: a 7 um gap at a breakout), or onto the ends of
+                    // the polylines before it in this call.
+                    var existing = snapTol > 0 ? SketchPointsOf(sk) : new List<double[]>();
+                    var filletCorners = snapTol > 0 ? FilletCornersOf(sk) : new List<double[]>();
+                    var looseEnds = new List<string>();
+                    foreach (var job in jobs)
+                    {
+                        var pts = job.Item2; var radii = job.Item3;
+                        string pre = jobs.Count > 1 ? job.Item1 + ": " : "";
+                        if (snapTol > 0)
+                        {
+                            foreach (int end in new[] { 0, pts.Count - 1 })
                             {
-                                double dx = q[0] - pts[end][0], dy = q[1] - pts[end][1], dz = q[2] - pts[end][2];
-                                double d = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                                if (d < best) { best = d; bp = q; }
-                            }
-                            string which = end == 0 ? "start" : "end";
-                            if (bp != null && best <= snapTol)
-                            {
-                                if (best > 1e-9) steps.Add($"{which} snapped {Math.Round(best * 1e6, 1)} um onto an existing route point");
-                                else steps.Add($"{which} on an existing route point");
-                                pts[end] = new[] { bp[0], bp[1], bp[2] };
-                            }
-                            else
-                            {
-                                steps.Add($"{which} is a new route point (nearest existing {(bp == null ? "none" : Math.Round(best * 1000, 3) + " mm")})");
-                                // Refuse only an end placed on a corner that a fillet removed: a new
-                                // node a few mm past a route point is a normal extension (a short
-                                // bundle between two breakouts), and was refused by the earlier
-                                // distance-to-point rule.
-                                foreach (var fc in filletCorners)
+                                double best = double.MaxValue; double[] bp = null;
+                                foreach (var q in existing)
                                 {
-                                    double fx = fc[0] - pts[end][0], fy = fc[1] - pts[end][1], fz = fc[2] - pts[end][2];
-                                    double fd = Math.Sqrt(fx * fx + fy * fy + fz * fz);
-                                    if (fd > freeTol) continue;
-                                    looseEnds.Add($"{which} point {(end == 0 ? 0 : pts.Count - 1)} is the corner of a filleted bend "
-                                        + $"({Math.Round(fd * 1000, 3)} mm), not on the route: the fillet removed that vertex "
-                                        + $"(nearest route point {Math.Round(best * 1000, 3)} mm away at [{Math.Round(bp[0], 6)}, {Math.Round(bp[1], 6)}, {Math.Round(bp[2], 6)}])");
-                                    break;
+                                    double dx = q[0] - pts[end][0], dy = q[1] - pts[end][1], dz = q[2] - pts[end][2];
+                                    double d = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                                    if (d < best) { best = d; bp = q; }
+                                }
+                                string which = end == 0 ? "start" : "end";
+                                if (bp != null && best <= snapTol)
+                                {
+                                    if (best > 1e-9) steps.Add($"{pre}{which} snapped {Math.Round(best * 1e6, 1)} um onto an existing route point");
+                                    else if (jobs.Count == 1) steps.Add($"{which} on an existing route point");
+                                    pts[end] = new[] { bp[0], bp[1], bp[2] };
+                                }
+                                else
+                                {
+                                    steps.Add($"{pre}{which} is a new route point (nearest existing {(bp == null ? "none" : Math.Round(best * 1000, 3) + " mm")})");
+                                    // Refuse only an end placed on a corner that a fillet removed: a new
+                                    // node a few mm past a route point is a normal extension (a short
+                                    // bundle between two breakouts).
+                                    foreach (var fc in filletCorners)
+                                    {
+                                        double fx = fc[0] - pts[end][0], fy = fc[1] - pts[end][1], fz = fc[2] - pts[end][2];
+                                        double fd = Math.Sqrt(fx * fx + fy * fy + fz * fz);
+                                        if (fd > freeTol) continue;
+                                        looseEnds.Add($"{pre}{which} point {(end == 0 ? 0 : pts.Count - 1)} is the corner of a filleted bend "
+                                            + $"({Math.Round(fd * 1000, 3)} mm), not on the route: the fillet removed that vertex "
+                                            + $"(nearest route point {Math.Round(best * 1000, 3)} mm away at [{Math.Round(bp[0], 6)}, {Math.Round(bp[1], 6)}, {Math.Round(bp[2], 6)}])");
+                                        break;
+                                    }
                                 }
                             }
+                            existing.Add(pts[0]); existing.Add(pts[pts.Count - 1]);
                         }
-                    }
-                    var radii = new double[Math.Max(0, pts.Count - 2)];
-                    for (int i = 0; i < radii.Length; i++) radii[i] = bendRadius;
-                    string radiiJson = p?.Value<string>("bend_radii");
-                    if (!string.IsNullOrWhiteSpace(radiiJson) && radiiJson.Trim() != "[]")
-                    {
-                        var ra = JArray.Parse(radiiJson);
-                        if (ra.Count != radii.Length)
-                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                                "INVALID_PARAMETER", $"bend_radii needs one radius per corner: {radii.Length} for {pts.Count} points.");
-                        for (int i = 0; i < radii.Length; i++) radii[i] = (double)ra[i];
-                    }
-                    for (int i = 1; i < pts.Count - 1; i++)
-                    {
-                        if (radii[i - 1] <= 0) continue;
-                        double[] u0 = Unit(Sub(pts[i], pts[i - 1])), v0 = Unit(Sub(pts[i + 1], pts[i]));
-                        double defl = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(u0, v0)))) * 180.0 / Math.PI;
-                        if (defl < minCornerDeg)
+                        for (int i = 1; i < pts.Count - 1; i++)
                         {
-                            warnings.Add($"corner {i} deflects {Math.Round(defl, 2)} deg (< min_corner_deg {minCornerDeg}): drawn sharp, radius {Math.Round(radii[i - 1] * 1000, 3)} mm ignored");
-                            radii[i - 1] = 0;
+                            if (radii[i - 1] <= 0) continue;
+                            double[] u0 = Unit(Sub(pts[i], pts[i - 1])), v0 = Unit(Sub(pts[i + 1], pts[i]));
+                            double defl = Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(u0, v0)))) * 180.0 / Math.PI;
+                            if (defl < minCornerDeg)
+                            {
+                                warnings.Add($"{pre}corner {i} deflects {Math.Round(defl, 2)} deg (< min_corner_deg {minCornerDeg}): drawn sharp, radius {Math.Round(radii[i - 1] * 1000, 3)} mm ignored");
+                                radii[i - 1] = 0;
+                            }
                         }
                     }
                     if (looseEnds.Count > 0 && !allowFree)
@@ -1168,16 +1301,25 @@ namespace SolidworksExecution.Services
                     }
                     if (dryRun)
                     {
-                        var geo = PolylineGeometry(pts, radii);
                         if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); steps.Add("ExitRoute (dry run)"); } catch { } }
-                        var dr = new JObject
+                        var dr = new JObject { ["route"] = ComponentPath(routeComp), ["dry_run"] = true };
+                        if (jobs.Count == 1)
                         {
-                            ["route"] = ComponentPath(routeComp),
-                            ["dry_run"] = true,
-                            ["points"] = new JArray(pts.Select(q => new JArray(Math.Round(q[0], 6), Math.Round(q[1], 6), Math.Round(q[2], 6)))),
-                            ["geometry"] = geo,
-                            ["steps"] = steps,
-                        };
+                            dr["points"] = new JArray(jobs[0].Item2.Select(q => new JArray(Math.Round(q[0], 6), Math.Round(q[1], 6), Math.Round(q[2], 6))));
+                            dr["geometry"] = PolylineGeometry(jobs[0].Item2, jobs[0].Item3);
+                        }
+                        else
+                        {
+                            dr["paths"] = new JArray(jobs.Select(jb => new JObject
+                            {
+                                ["name"] = jb.Item1,
+                                ["points"] = new JArray(jb.Item2.Select(q => new JArray(Math.Round(q[0], 6), Math.Round(q[1], 6), Math.Round(q[2], 6)))),
+                                ["geometry"] = PolylineGeometry(jb.Item2, jb.Item3),
+                            }));
+                            dr["length_mm"] = Math.Round(jobs.Sum(jb => DrawFilletedPolyline(null, jb.Item2, jb.Item3, new JArray())) * 1000, 3);
+                        }
+                        if (fanReport.Count > 0) dr["fan_out"] = fanReport;
+                        dr["steps"] = steps;
                         if (warnings.Count > 0) dr["warnings"] = warnings;
                         return ReadOnlyResponse(request, doc, dr);
                     }
@@ -1187,16 +1329,26 @@ namespace SolidworksExecution.Services
                     for (int ti = 0; ti < toggles.Length; ti++)
                     { prev[ti] = _solidWorks.GetUserPreferenceToggle(toggles[ti]); _solidWorks.SetUserPreferenceToggle(toggles[ti], false); }
                     sm.AddToDB = true;
+                    var drawn = new JArray();
                     try
                     {
-                        expected = DrawFilletedPolyline(sm, pts, radii, warnings);
+                        expected = 0;
+                        foreach (var job in jobs)
+                        {
+                            double len = DrawFilletedPolyline(sm, job.Item2, job.Item3, warnings);
+                            expected += len;
+                            if (jobs.Count > 1) drawn.Add(new JObject { ["name"] = job.Item1, ["points"] = job.Item2.Count, ["length_mm"] = Math.Round(len * 1000, 3) });
+                            // Merge after each polyline so that the next one's snapped ends join it.
+                            if (jobs.Count > 1 && mergeTol > 0) { try { sk.MergePoints(mergeTol); } catch { } }
+                        }
                     }
                     finally
                     {
                         sm.AddToDB = prevDb;
                         for (int ti = 0; ti < toggles.Length; ti++) _solidWorks.SetUserPreferenceToggle(toggles[ti], prev[ti]);
                     }
-                    steps.Add($"drew {pts.Count} points");
+                    steps.Add(jobs.Count == 1 ? $"drew {jobs[0].Item2.Count} points" : $"drew {jobs.Count} polylines");
+                    if (drawn.Count > 0) drawnPaths = drawn;
                 }
                 // Merge coincident points (consecutive segments, bundle ends at breakouts, stub ends),
                 // also on a call without points: route_path(points='[]') repairs a gap.
@@ -1211,6 +1363,8 @@ namespace SolidworksExecution.Services
                 if (tf != null) result["route_transform"] = tf;
                 if (sk != null) result["sketch"] = RouteSketchGeometry(sk);
                 if (expected >= 0) result["drawn_length_mm"] = Math.Round(expected * 1000.0, 3);
+                if (drawnPaths != null) result["paths"] = drawnPaths;
+                if (fanReport.Count > 0) result["fan_out"] = fanReport;
 
                 if (exit)
                 {

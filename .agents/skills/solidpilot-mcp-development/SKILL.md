@@ -60,6 +60,10 @@ description: >-
    `uv run --no-project --python 3.13 --with-requirements adapters/claude/requirements.txt --with pytest python -m pytest -q adapters/claude/tests`
    (contract, HTTP client and error-passing tests).
 5. **README**: tool count and the tool's line in its section.
+6. **An alternative input to an existing tool** (e.g. `route_path(paths=..., fan_out=...)` next
+   to `points`): search the method for every guard on the old input (`dry_run needs points`
+   refused a dry run with only the new ones) and send the new parameter from the adapter only
+   when it is non-empty, so an older execution server keeps working.
 
 ## Building
 
