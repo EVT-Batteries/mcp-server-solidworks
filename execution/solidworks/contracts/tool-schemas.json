@@ -1002,9 +1002,10 @@
     "snap_tolerance": "number (optional, meters, default 0.0005 - 0 = no snapping)",
     "merge_tolerance": "number (optional, meters, default 1e-5 - 0 = no merge)",
     "dry_run": "boolean (optional, default false - read the route sketch without EditRoute, snap and check, return the points and their geometry; draws nothing)",
-    "allow_free_ends": "boolean (optional, default false - draw an end that misses the route within free_end_tolerance)",
-    "free_end_tolerance": "number (optional, meters, default 0.02 - an unsnapped end this close to a route point fails END_NOT_ON_ROUTE)",
-    "min_corner_deg": "number (optional, degrees, default 10 - corners deflecting less are drawn sharp)"
+    "allow_free_ends": "boolean (optional, default false - draw an end that sits on a corner a fillet removed)",
+    "free_end_tolerance": "number (optional, meters, default 0.0005 - an unsnapped end this close to the tangent intersection of a route arc fails END_NOT_ON_ROUTE)",
+    "min_corner_deg": "number (optional, degrees, default 10 - corners deflecting less are drawn sharp)",
+    "wire_paths": "string (optional - JSON {wire: [segment ids] | \"<other wire>\"}: IWire.SetRoutePathForWire on exit, after RouteWires; e.g. a wire attached to the wrong connector takes the path of its twin)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, steps, warnings?}."

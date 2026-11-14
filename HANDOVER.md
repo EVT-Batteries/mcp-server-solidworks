@@ -68,7 +68,7 @@ from those tests):
 | Item | Change | Effect measured |
 |---|---|---|
 | a | New tool `check_path_clearance` (`Services/SolidWorksService.PathClearance.cs`): the path(s) as circular sweeps in a temporary part, inserted at the origin, `check_interference` on it, each hit mapped to `leg` / `at_mm_along_path` / `near_corner`, then the component, part and file removed. `paths` checks a trunk and its branches together; `ignore` drops the connectors a path ends in | 27-37 s per candidate (was an import + draw + rebuild + check, several minutes); a known clashing path gave the same parts, on the right legs; the final route came back `clear` |
-| b | `route_path`: `dry_run` (snap, check, `geometry` with per-corner tangents and per-leg straight rest; reads the route sketch through the component, without `EditRoute`); `END_NOT_ON_ROUTE` when an end misses a route point by less than `free_end_tolerance` (a branch started at a filleted corner); corners deflecting less than `min_corner_deg` drawn sharp | the corner case fails before drawing with the miss distance and the nearest route point; a dry run leaves no file changed |
+| b | `route_path`: `dry_run` (snap, check, `geometry` with per-corner tangents and per-leg straight rest; reads the route sketch through the component, without `EditRoute`); `END_NOT_ON_ROUTE` when an end sits on a corner a fillet removed (a branch started at a filleted corner); corners deflecting less than `min_corner_deg` drawn sharp | the corner case fails before drawing with the miss distance and the nearest route point; a dry run leaves no file changed |
 | c | `check_rebuild` rebuilds out-of-date features only (`EditRebuild3`) unless `force`; `import_from_to` and `route_path` (on exit) also no longer `ForceRebuild3`; `save_document(documents=[...])` saves exactly the named open documents | no more "every reference modified" after a check |
 | d | `component_status` / `set_component_state`: `include_mates` off by default, `time_budget_s` (default 60) with `truncated`; `FindComponentByName` walks an instance path down the tree instead of building the path of every component | 3 nested names: 47.6 s -> 4.0 s; a mate scan stops at the budget |
 | e | Counts by default: `check_rebuild` (`components_not_loaded` per reason), `save_document` (lists cut to 20), `routing_status` / `add_routing_point` (only add-in state and cable / component library unless `verbose`) | `check_rebuild` on the large assembly: 449 characters (was ~240 kB) |
@@ -88,8 +88,35 @@ Still open:
 - `check_path_clearance` leaves the assembly marked modified (a component added and removed) and
   the temporary part file locked until a later call deletes it (SolidWorks keeps the removed
   component's model in memory).
-- `route_path`'s `END_NOT_ON_ROUTE` also flags a deliberate free end within `free_end_tolerance`
-  (20 mm) of the route: pass `allow_free_ends=true` for those.
+- Fixed: `route_path`'s `END_NOT_ON_ROUTE` first flagged every new end within 20 mm of a route
+  point, which refused a normal 7.5 mm bundle between two breakouts. It now flags only an end
+  on a corner a fillet removed (the tangent intersection of a route arc, within
+  `free_end_tolerance`, default 0.5 mm).
+- New `route_path(wire_paths={wire: [segment ids] | "<twin wire>"})` sets wires' paths on exit
+  (`IWire.SetRoutePathForWire`). Open: SOLIDWORKS refused it (code 2) for the case it was written
+  for, wires left `mismatched_to_component` by `RouteWires` (four wires on pins 1-4 of one
+  12-way connector, whose twins to the same connectors route correctly). Root cause of that
+  mismatch not found: from-to list, connector part (one connection point, no pins) and component
+  library all checked; next: renumber the pins in a test list, or import those wires alone.
+
+### 6. Improvement ideas from rerouting harnesses (2026-11-13, session 2)
+
+Difficulties met while making two harness positions identical and redrawing a four-configuration
+route network, with how they were worked around and what would remove them. Most valuable first.
+
+| # | Difficulty | Workaround used | Proposed improvement |
+|---|---|---|---|
+| a | Redrawing a route with the same network (to change one branch) meant reading the sketch, rebuilding branches as corner points, turning connector branches into stub-end starts, and replaying 13 `route_path` calls per route (external scripts). | Scripts: sketch geometry -> branches -> `route_path` plans | `routing_status(route, as_branches=True)`: each branch between nodes as `route_path` input (stub-end start, corners, radii, wires carried). Then `route_path(bundles=[...])`: draw a whole network in one call, any order, exit once. |
+| b | `routing_status` returns segments and per-wire segment IDs only for routes whose wires were routed in the session; older routes gave none. | Branch lengths and wire sets computed from `measure_curves(include_geometry)` and wire cut lengths (graph search, connector tips matched by cut length) | Compute segments from the route sketch when the Routing API has none; report per branch: length, wire set, end nodes. |
+| c | A route of a configuration that was not active when its connector moved kept the old stub: the plan built from it started 2.5 mm off, and 10 wires stayed unrouted. | Shift the start by the plug move | `routing_status` / `route_path` report each connector's current stub end (CPoint position + stub) in assembly coordinates; `route_path` can snap a start to the nearest stub end within a tolerance and say so. |
+| d | Equal-length solving (loop radius, bump height, corner positions) by bisection in a filleted-polyline model, outside the tool. | Python model + bisection; confirmed by cut lengths | `route_path(target_length_mm, vary=<point index, axis> | loop_radius)` (item 5b, still open): solve one free parameter to a target branch length. |
+| e | `check_path_clearance(ignore=[...])` with a broad fragment hid a real clash with the harness's own receptacle (14 mm3). | Re-ran with narrower ignores | Report ignored hits apart (`ignored_hits`) instead of dropping them; warn when an ignored component overlaps the path. |
+| f | `save_document(documents=[...])` on a large top assembly still rewrote rebuild-only references (bolts, valves, other harnesses), and read-only `routing_status` dumps left other routes modified (they enter edit focus). | Close all without saving, restore from version control, reopen | Save with options that do not save references (check `swSaveAsOptions_SaveReferenced`); have read-only route readers leave no modified flag, or report `marked_modified`. |
+| g | Moving holes in a sheet-metal part: no tool deletes sketch entities or relations, so two of three holes on a shared construction line could not move. | Suppress the cut, new sketch with all holes, new cut, delete the old cut, re-mate what used the old hole | `edit_sketch_entities(sketch, delete=[...], move=[...])`, and a report of mates that reference faces a feature edit removes. |
+| h | Face queries (`analyze_model(faces, near)`) on a 4000-face part exceeded the adapter's 30 s timeout. | Direct HTTP call with a long timeout | Prefilter faces by bounding box before computing per-face data; or treat `analyze_model` as a long tool. |
+| i | No tool reads `IComponent2.ComponentReference` (reference designators matter for from-to imports). | COM probe from Windows PowerShell | Add `reference` to `component_status`. |
+| j | `measure_curves(as_route=True)` fails on branched route sketches ("not one connected chain"). | Graph reconstruction outside | Return one route per branch for branched sketches. |
+| k | `RouteWires` attached four wires to the wrong connector (`mismatched_to_component`); `SetRoutePathForWire` refused the fix. | Lengths taken from the layout instead | Report `mismatched_*` wires with the component SOLIDWORKS attached them to (needs an API to read it), so the cause can be found. |
 
 ### 4. Smaller things noticed
 

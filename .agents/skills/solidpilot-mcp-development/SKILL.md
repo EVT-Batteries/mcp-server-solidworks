@@ -297,7 +297,26 @@ Results are in `$r.cadState.features` (often one JSON string).
   - **COM from a script**: PowerShell 7 has no `Marshal.GetActiveObject`, and late-bound calls on
     SolidWorks fail (`TYPE_E_ELEMENTNOTFOUND`). For a quick API experiment, compile a small C#
     class with `Add-Type` in Windows PowerShell 5.1 (`powershell.exe -STA`), loading
-    `SolidWorks.Interop.sldworks.dll` from the SolidWorks install first.
+    `SolidWorks.Interop.sldworks.dll` from the SolidWorks install first (`Assembly.LoadFrom`
+    before `Add-Type -ReferencedAssemblies`, or the type fails to load; warnings are errors).
+    Routing interfaces (`IWire`, `IElectricalRoute`, `swWireRouteError_e`,
+    `swSetRoutePathForWireErrorType_e`) are in `SolidWorks.Interop.SWRoutingLib.dll`.
+  - **Route checks must test the real failure, not a proxy**: `route_path`'s loose-end check
+    first refused any new end within 20 mm of a route point, which blocked a normal 7.5 mm
+    bundle between two breakouts. The failure it guards against is an end on a corner a fillet
+    removed: test against the arcs' tangent intersections (`FilletCornersOf`).
+  - **`IWire.SetRoutePathForWire(segment ids)`** returns 0 on success, 2 (failed) when
+    SOLIDWORKS rejects the path. It refused every wire whose end was itself
+    `mismatched_to_component` (a wire attached to the wrong connector after `RouteWires`), even
+    with the exact segments of a correctly routed twin; it is not a fix for that case.
+  - **Replacing a route**: `import_from_to(replaces=...)` cannot delete a route that is still
+    being edited (a failed `route_path` leaves it open): call `route_path(points='[]',
+    exit_route=True, route_wires=False)` first. A route assembly SOLIDWORKS still holds may
+    survive the file deletion: check `git status` for leftovers.
+  - **Saving a large top assembly** writes rebuild-only changes into many references
+    (bolts, valves, other harnesses), even with `save_document(documents=[...])`. Close
+    everything without saving afterwards, restore those files from version control, and
+    reopen to confirm a clean rebuild.
   - **Closing a referenced document**: `CloseDoc` on a part that an open assembly references
     keeps the part in memory with its unsaved changes; reopening it shows them, and saving the
     assembly would write them. To discard test changes, close the assembly without saving too.

@@ -553,7 +553,8 @@ namespace SolidworksExecution.Services
 
         // Route the wires of a route sub-assembly through its segments (IElectricalRoute.RouteWires,
         // available while the route component is edited), back to the top assembly after.
-        private void RouteWiresOn(IModelDoc2 doc, IAssemblyDoc asm, IComponent2 routeComp, JArray steps, JArray warnings)
+        private void RouteWiresOn(IModelDoc2 doc, IAssemblyDoc asm, IComponent2 routeComp, JArray steps, JArray warnings,
+                                  JObject wirePaths = null, bool routeFirst = true)
         {
             var routeAsm = routeComp.GetModelDoc2() as IAssemblyDoc;
             var rrm = routeAsm?.GetRouteManager() as IRouteManager;
@@ -564,9 +565,69 @@ namespace SolidworksExecution.Services
             {
                 var er = rrm?.GetElectricalRoute() as IElectricalRoute;
                 if (er == null) warnings.Add("no electrical route in " + ComponentPath(routeComp));
-                else steps.Add("RouteWires: " + er.RouteWires());
+                else
+                {
+                    if (routeFirst) steps.Add("RouteWires: " + er.RouteWires());
+                    if (wirePaths != null && wirePaths.Count > 0) SetWirePaths(er, wirePaths, steps, warnings);
+                }
             }
             finally { try { asm.EditAssembly(); } catch { } doc.ClearSelection2(true); }
+        }
+
+        // wire_paths parameter: a JSON object (or its string form) {wire: [segment ids] | "<wire>"}.
+        private static JObject ParseWirePaths(JObject p)
+        {
+            var tok = p?["wire_paths"];
+            if (tok == null || tok.Type == JTokenType.Null) return null;
+            JObject o = tok.Type == JTokenType.String
+                ? (string.IsNullOrWhiteSpace((string)tok) ? null : JObject.Parse((string)tok))
+                : tok as JObject;
+            return o != null && o.Count > 0 ? o : null;
+        }
+
+        private static int[] SegmentIdsOf(IWire w)
+        {
+            object o = null;
+            try { o = w.GetRouteSegmentIDs(); } catch { }
+            if (o is int[] ia) return ia;
+            if (o is object[] oa) return oa.Select(Convert.ToInt32).ToArray();
+            return new int[0];
+        }
+
+        // Set wires' paths explicitly (IWire.SetRoutePathForWire): {wire: [segment ids]} or
+        // {wire: "<other wire>"} = the path of another wire. RouteWires can attach a wire end to the
+        // wrong connector or leave it unrouted although its from-to data are right (seen on four
+        // wires ending on pins 1-4 of one 12-way connector, whose twins to the same connectors
+        // routed correctly); copying the twin's path fixes them.
+        private static void SetWirePaths(IElectricalRoute er, JObject wirePaths, JArray steps, JArray warnings)
+        {
+            var byName = new Dictionary<string, IWire>(StringComparer.OrdinalIgnoreCase);
+            if (er.GetWires() is object[] ws)
+                foreach (var o in ws)
+                    if (o is IWire w) { string n = SafeStr(() => w.UserName); if (!string.IsNullOrEmpty(n)) byName[n] = w; }
+            foreach (var kv in wirePaths)
+            {
+                if (!byName.TryGetValue(kv.Key, out var target)) { warnings.Add($"wire_paths: wire {kv.Key} not found"); continue; }
+                int[] ids;
+                string source;
+                if (kv.Value.Type == JTokenType.String)
+                {
+                    string other = (string)kv.Value;
+                    if (!byName.TryGetValue(other, out var tw)) { warnings.Add($"wire_paths: wire {other} (path of {kv.Key}) not found"); continue; }
+                    ids = SegmentIdsOf(tw);
+                    source = "path of " + other;
+                }
+                else
+                {
+                    ids = (kv.Value as JArray)?.Select(t => (int)t).ToArray() ?? new int[0];
+                    source = "segments";
+                }
+                if (ids.Length == 0) { warnings.Add($"wire_paths: no segments for {kv.Key} ({source})"); continue; }
+                int rc = -1;
+                try { rc = target.SetRoutePathForWire(ids); }
+                catch (Exception ex) { warnings.Add($"wire_paths: {kv.Key}: " + ex.Message); continue; }
+                steps.Add($"wire {kv.Key} <- {source} [{string.Join(",", ids)}]: SetRoutePathForWire {rc}");
+            }
         }
 
         // Edit the route, turn its guidelines (the connector pairs a from-to import still has to
@@ -655,6 +716,33 @@ namespace SolidworksExecution.Services
                 if (seg == null || seg.ConstructionGeometry) continue;
                 if (seg is ISketchLine ln) { Add(ln.GetStartPoint2() as ISketchPoint); Add(ln.GetEndPoint2() as ISketchPoint); }
                 else if (seg is ISketchArc arc) { Add(arc.GetStartPoint2() as ISketchPoint); Add(arc.GetEndPoint2() as ISketchPoint); }
+            }
+            return list;
+        }
+
+        // The corners a fillet removed: for every arc of the sketch, the point where its two
+        // tangents meet (centre + bisector * r / cos(sweep / 2)). A bundle started there is drawn
+        // but not connected to the route (its wires stay unrouted).
+        private static List<double[]> FilletCornersOf(ISketch sk)
+        {
+            var list = new List<double[]>();
+            if (!(sk?.GetSketchSegments() is object[] segs)) return list;
+            foreach (var o in segs)
+            {
+                if (!(o is ISketchArc arc) || ((ISketchSegment)arc).ConstructionGeometry) continue;
+                var s = arc.GetStartPoint2() as ISketchPoint;
+                var e = arc.GetEndPoint2() as ISketchPoint;
+                var c = arc.GetCenterPoint2() as ISketchPoint;
+                if (s == null || e == null || c == null) continue;
+                double[] a = { s.X - c.X, s.Y - c.Y, s.Z - c.Z }, b = { e.X - c.X, e.Y - c.Y, e.Z - c.Z };
+                double r = Math.Sqrt(Dot(a, a));
+                if (r < 1e-9) continue;
+                double cos = Math.Max(-1.0, Math.Min(1.0, Dot(a, b) / (r * Math.Sqrt(Dot(b, b)))));
+                double half = Math.Acos(cos) / 2;
+                if (half < 1e-6 || half > Math.PI / 2 - 1e-3) continue;
+                double[] bis = Unit(new[] { a[0] + b[0], a[1] + b[1], a[2] + b[2] });
+                double d = r / Math.Cos(half);
+                list.Add(new[] { c.X + bis[0] * d, c.Y + bis[1] * d, c.Z + bis[2] * d });
             }
             return list;
         }
@@ -809,13 +897,13 @@ namespace SolidworksExecution.Services
                 // dry_run: snap and check the points against the route as it is, report the lengths,
                 // draw nothing. Checks that refuse a draw that would leave wires unrouted:
                 // - an end that does not snap onto a route point but lies within free_end_tolerance
-                //   of one (a branch started at a corner whose fillet removed the vertex, 3.9 mm off),
-                //   unless allow_free_ends;
+                //   of a corner a fillet removed (a branch started at such a corner, 3.9 mm off the
+                //   arc), unless allow_free_ends;
                 // - corners deflecting less than min_corner_deg are drawn sharp: with a fillet, a 4 deg
                 //   corner split the route into disconnected segments.
                 bool dryRun = p?.Value<bool?>("dry_run") ?? false;
                 bool allowFree = p?.Value<bool?>("allow_free_ends") ?? false;
-                double freeTol = p?.Value<double?>("free_end_tolerance") ?? 0.02;
+                double freeTol = p?.Value<double?>("free_end_tolerance") ?? 0.0005;
                 double minCornerDeg = p?.Value<double?>("min_corner_deg") ?? 10.0;
                 bool enteredHere = false;
                 if (dryRun && (string.IsNullOrWhiteSpace(pointsJson) || pointsJson.Trim() == "[]"))
@@ -920,6 +1008,7 @@ namespace SolidworksExecution.Services
                     if (snapTol > 0)
                     {
                         var existing = SketchPointsOf(sk);
+                        var filletCorners = FilletCornersOf(sk);
                         foreach (int end in new[] { 0, pts.Count - 1 })
                         {
                             double best = double.MaxValue; double[] bp = null;
@@ -939,9 +1028,20 @@ namespace SolidworksExecution.Services
                             else
                             {
                                 steps.Add($"{which} is a new route point (nearest existing {(bp == null ? "none" : Math.Round(best * 1000, 3) + " mm")})");
-                                if (bp != null && best <= freeTol)
-                                    looseEnds.Add($"{which} point {(end == 0 ? 0 : pts.Count - 1)} misses the route by {Math.Round(best * 1000, 3)} mm "
-                                        + $"(nearest route point [{Math.Round(bp[0], 6)}, {Math.Round(bp[1], 6)}, {Math.Round(bp[2], 6)}])");
+                                // Refuse only an end placed on a corner that a fillet removed: a new
+                                // node a few mm past a route point is a normal extension (a short
+                                // bundle between two breakouts), and was refused by the earlier
+                                // distance-to-point rule.
+                                foreach (var fc in filletCorners)
+                                {
+                                    double fx = fc[0] - pts[end][0], fy = fc[1] - pts[end][1], fz = fc[2] - pts[end][2];
+                                    double fd = Math.Sqrt(fx * fx + fy * fy + fz * fz);
+                                    if (fd > freeTol) continue;
+                                    looseEnds.Add($"{which} point {(end == 0 ? 0 : pts.Count - 1)} is the corner of a filleted bend "
+                                        + $"({Math.Round(fd * 1000, 3)} mm), not on the route: the fillet removed that vertex "
+                                        + $"(nearest route point {Math.Round(best * 1000, 3)} mm away at [{Math.Round(bp[0], 6)}, {Math.Round(bp[1], 6)}, {Math.Round(bp[2], 6)}])");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1028,9 +1128,11 @@ namespace SolidworksExecution.Services
                     try { asm.EditAssembly(); steps.Add("EditAssembly"); } catch (Exception ex) { steps.Add("EditAssembly failed: " + ex.Message); }
                     try { doc.EditRebuild3(); } catch { }
                     // Wires (from a from-to import) follow the new geometry: route them, report them.
-                    if (p?.Value<bool?>("route_wires") ?? true)
+                    JObject wirePaths = ParseWirePaths(p);
+                    bool doRoute = p?.Value<bool?>("route_wires") ?? true;
+                    if (doRoute || wirePaths != null)
                     {
-                        RouteWiresOn(doc, asm, routeComp, steps, warnings);
+                        RouteWiresOn(doc, asm, routeComp, steps, warnings, wirePaths, doRoute);
                         var er = ReadElectricalRoute(doc, asm, routeComp);
                         if (er["wires"] is JArray w && w.Count > 0) result["wires"] = w;
                         if (er["segments"] != null) result["segments"] = er["segments"];

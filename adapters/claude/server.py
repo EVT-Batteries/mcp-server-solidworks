@@ -1657,8 +1657,9 @@ def route_path(
     merge_tolerance: Annotated[float, Field(ge=0)] = 1e-5,
     dry_run: bool = False,
     allow_free_ends: bool = False,
-    free_end_tolerance: Annotated[float, Field(ge=0)] = 0.02,
+    free_end_tolerance: Annotated[float, Field(ge=0)] = 0.0005,
     min_corner_deg: Annotated[float, Field(ge=0, le=90)] = 10.0,
+    wire_paths: str = "",
 ) -> str:
     """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one call per
     bundle). Bumps state_version. To redraw a bundle, delete the route
@@ -1683,10 +1684,12 @@ def route_path(
     merge_tolerance (m): coincident points are merged within this distance on every call; a
         call with points='[]' merges an existing gap.
     Checks before drawing (nothing is drawn when one fails):
-    - END_NOT_ON_ROUTE: an end that does not snap but lies within free_end_tolerance (m) of a
-      route point. Typical cause: a branch started at a corner of an earlier call, whose fillet
-      removed that vertex (3.9 mm off); its wires stay unrouted. Put branch nodes on straight legs,
-      at least r*tan(deflection/2) from a corner. allow_free_ends=True draws anyway.
+    - END_NOT_ON_ROUTE: an end that does not snap and lies within free_end_tolerance (m) of a
+      corner that a fillet of the route removed (where an arc's two tangents meet): a branch
+      started at a corner of an earlier call is drawn 3.9 mm off the arc and its wires stay
+      unrouted. Put branch nodes on straight legs, at least r*tan(deflection/2) from a corner.
+      A new node anywhere else (a short bundle extending the route to the next breakout) is
+      fine. allow_free_ends=True draws anyway.
     - Corners deflecting less than min_corner_deg are drawn sharp (warning): a filleted 4 deg
       corner split a route into disconnected segments.
     dry_run=True: snap and check, then return the points as they would be drawn and their
@@ -1695,14 +1698,22 @@ def route_path(
     entering route edit (leaving route edit rewrites the route's segmentList.xml): nothing changes.
     Wire length = the route segments it runs through + both stubs: add a dry run's length_mm to
     the existing segments to predict it before drawing.
+    wire_paths: JSON {wire: [segment ids] | "<other wire>"}, applied on exit after the wires
+        are routed (IWire.SetRoutePathForWire): a wire SOLIDWORKS attached to the wrong
+        connector or left unrouted, although its from-to data are right, takes the path of a
+        twin wire between the same connectors, e.g. '{"W5": "W24"}'. On an existing route:
+        route_path(route=..., points='[]', wire_paths=..., route_wires=False) applies only them.
     Returns the route sketch (segments, total length_mm, open_ends), drawn_length_mm, and after
     exit the wires and segments; steps say whether each end snapped onto the route."""
-    return _call("route_path", {
+    params = {
         "route": route, "points": points, "bend_radius": bend_radius, "bend_radii": bend_radii,
         "add_cpoints": add_cpoints, "exit_route": exit_route, "route_wires": route_wires,
         "snap_tolerance": snap_tolerance, "merge_tolerance": merge_tolerance,
         "dry_run": dry_run, "allow_free_ends": allow_free_ends,
-        "free_end_tolerance": free_end_tolerance, "min_corner_deg": min_corner_deg})
+        "free_end_tolerance": free_end_tolerance, "min_corner_deg": min_corner_deg}
+    if wire_paths and wire_paths.strip() not in ("", "{}"):
+        params["wire_paths"] = wire_paths
+    return _call("route_path", params)
 
 
 @mcp.tool(structured_output=False)
