@@ -96,6 +96,7 @@ LONG_TOOLS = {
     "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
     "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
     "replace_component", "insert_part", "edit_bodies", "check_path_clearance",
+    "analyze_model", "connector_cavities", "add_connector_pins",
 }
 
 
@@ -432,7 +433,8 @@ def component_status(
     `match` (substring of the instance path or file path) and `state` ('suppressed', 'lightweight',
     'resolved', 'hidden' or 'missing' = file not found). Each entry: component (instance path),
     suppression (suppressed / lightweight / resolved / fully_resolved), file, file_missing,
-    configuration, hidden, fixed, envelope, parent_suppressed (a suppressed sub-assembly holding it),
+    configuration, reference (the reference designator a routing from-to import matches),
+    hidden, fixed, envelope, parent_suppressed (a suppressed sub-assembly holding it),
     excluded_from_bom, transform (13 numbers, m), with boxes=True box_mm (world bounding box, mm),
     and with include_mates=True its mates: name, type, suppressed, severity / code / meaning when the
     mate has a rebuild error, and the instance paths of the components it references (null =
@@ -1526,7 +1528,8 @@ def sweep_circular(
 # its cut length. routing_status reads everything back.
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
-def routing_status(route: str = "", verbose: bool = False) -> str:
+def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
+                   terminations: str = "") -> str:
     """Read SOLIDWORKS Routing state (read-only, does NOT change state_version).
     Always: whether the Routing add-in is loaded and its cable / component library files;
     verbose=True: every library file location and the from-to header definitions (an EMPTY one
@@ -1537,8 +1540,23 @@ def routing_status(route: str = "", verbose: bool = False) -> str:
     with route=<one of them>, its wires (name, from/to as 'REF.pin', cut_length_mm, the route
     segments they run through, errors such as not_routed / violates_bend_radius, wire part
     number, colour, diameter_mm) and segments (id, length_mm, bend_radius_mm,
-    bundle_diameter_mm)."""
-    return _call("routing_status", {"route": route, "verbose": verbose})
+    bundle_diameter_mm).
+    connectors: JSON list of component names / instance paths, or a name fragment (matched
+        against the instance names of loaded parts): each one's reference designator and its
+        connection points (name, pin, location_mm, direction, stub_mm, stub_end_mm) in the
+        ACTIVE assembly's coordinates, as they are now. Start a route branch on stub_end_mm.
+    terminations: JSON {"<REF>.<pin>" | "<REF>" | "*": allowance_mm | {"allowance_mm": a,
+        "strip_mm": s, ...}} (most specific key wins). The allowance is the wire length beyond
+        the route end at the connection point (housing rear face -> conductor end in the crimp).
+        Each wire then gets termination {from, to} (the matching entries, extra keys kept) and
+        total_cut_length_mm = cut_length_mm + both allowances: the length to cut, strip
+        included. Wires with an end lacking an entry: terminations_missing."""
+    params = {"route": route, "verbose": verbose}
+    if connectors.strip():
+        params["connectors"] = connectors
+    if terminations.strip():
+        params["terminations"] = terminations
+    return _call("routing_status", params)
 
 
 @mcp.tool(structured_output=False)
@@ -1584,6 +1602,79 @@ def add_routing_point(
         "component_type": component_type, "diameter": diameter, "stub_length": stub_length,
         "sub_type": sub_type, "reverse": reverse, "direction": direction,
         "exit_depth": exit_depth, "verbose": verbose})
+
+
+@mcp.tool(structured_output=False)
+def connector_cavities(
+    direction: str,
+    up: str = "",
+    numbering: str = "",
+    exit_depth: Annotated[float, Field(ge=0)] = 0.001,
+    min_size: Annotated[float, Field(ge=0)] = 0.0005,
+    size_tolerance: Annotated[float, Field(ge=0, le=1)] = 0.2,
+    expected_count: Annotated[int, Field(ge=0)] = 0,
+) -> str:
+    """Find the wire cavities of the ACTIVE PART (a connector housing) from its 3D model
+    (read-only, does NOT change state_version): the openings (inner loops) of the wire-exit face,
+    sorted into a grid as seen from the wire side.
+    direction: JSON [x, y, z], the outward normal of the wire-exit (rear) face, part coordinates.
+        Check which end is the rear first: terminals enter from the rear, so its openings are at
+        least the terminal's cross-section; the mating face has the small pin entries.
+    up: JSON [x, y, z], the 'up' of the view (e.g. the latch side, as the datasheet's cavity
+        numbering view shows it); default: the part axis least aligned with direction.
+    numbering: JSON {"first": "top_left"|"top_right"|"bottom_left"|"bottom_right", "along":
+        "row"|"column", "start": 1}: pin `start` at that corner of the grid as seen from the wire
+        side, counting along rows (or columns) over every grid position. Take it from the
+        datasheet's numbering view and confirm it on moulded cavity numbers when the model has
+        them. Without it, cavities only carry row / col.
+    exit_depth (m): faces within this of the outermost one along direction are searched too.
+    min_size (m): openings smaller than this in either direction are not cavities (moulded
+        text, marks). The cavities are the openings of the most common size (within
+        size_tolerance); the rest are listed in other_openings (latch windows, key slots).
+    expected_count: warn when the number of cavities differs.
+    Returns cavities (pin, row, col, point = centre on the exit face in part coordinates m,
+    u_mm / v_mm in the view frame, width_mm / height_mm), rows, columns, row_pitch_mm,
+    column_pitch_mm, cavity_size_mm, view_right / view_up, and with numbering `pins`: the input
+    of add_connector_pins."""
+    params = {"direction": direction, "exit_depth": exit_depth, "min_size": min_size,
+              "size_tolerance": size_tolerance, "expected_count": expected_count}
+    if up.strip():
+        params["up"] = up
+    if numbering.strip():
+        params["numbering"] = numbering
+    return _call("connector_cavities", params)
+
+
+@mcp.tool(structured_output=False)
+def add_connector_pins(
+    pins: str,
+    direction: str,
+    stub_length: Annotated[float, Field(ge=0)] = 0.005,
+    replace_existing: bool = False,
+    name_prefix: str = "CPoint_",
+    face_index: int = -1,
+    exit_depth: Annotated[float, Field(ge=0)] = 0.001,
+) -> str:
+    """Give the ACTIVE PART (a connector housing; local CAD copies only: it edits the part) one
+    SOLIDWORKS Routing connection point per pin, at its cavity on the wire-exit face, each
+    carrying its pin number (ConnectionPointFeatureData.ElectricalPinID). A from-to import then
+    attaches every wire to its own cavity (wires fan out from the cavities, and the wire-to-pin
+    match is checked) instead of all wires sharing one point. Bumps state_version.
+    pins: JSON [{"pin": "1", "point": [x, y, z]}, ...] in METERS, part coordinates (the `pins`
+        of connector_cavities); points are moved onto the exit face plane along direction.
+    direction: JSON [x, y, z], outward normal of the wire-exit face (the route leaves along it;
+        a point created the other way is recreated reversed).
+    stub_length (m): straight wire out of each cavity before the route (default 5 mm).
+    replace_existing: delete the part's connection points first (and the point sketches only
+        they used). Without it, a part that already has a point without a pin, or with one of
+        these pins, is refused: SOLIDWORKS would share wires between them.
+    Also sets the part's Routing component type to connector (electrical). Save the part after.
+    Returns connection_points (pin, feature, pin_id read back, location, direction, stub_mm),
+    the exit face, deleted features and warnings."""
+    return _call("add_connector_pins", {
+        "pins": pins, "direction": direction, "stub_length": stub_length,
+        "replace_existing": replace_existing, "name_prefix": name_prefix,
+        "face_index": face_index, "exit_depth": exit_depth})
 
 
 @mcp.tool(structured_output=False)
@@ -1740,8 +1831,10 @@ def check_path_clearance(
     bend_radius / bend_radii (m) as in route_path. paths: JSON list of {points, bend_radii,
     bend_radius, diameter} to check a trunk and its branches together (instead of points).
     clearance (m): also report neighbours closer than this (slower: one Measure per neighbour).
-    ignore: JSON list of name fragments to leave out (e.g. the connectors the path ends in, which
-    it touches by design).
+    ignore: JSON list of name fragments to leave out of the verdict (e.g. the connectors the path
+    ends in, which it touches by design). Their hits are still reported apart, located on the
+    path (ignored_hits, ignored_violations): check that each is the expected end contact, not a
+    real clash a broad fragment hid.
     Returns interference_count and interferences (largest first): component, volume_mm3, box_mm,
     and where on the path: path (when several), leg (points k -> k+1), at_mm_along_path,
     near_corner. clearance_violations, nearest_mm, path_length_mm, `clear`.

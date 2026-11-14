@@ -447,7 +447,7 @@
     "time_budget_s": "number (optional, default 60, 0 = none - stop listing / mate scans after this many seconds, truncated=true)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, reference?, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached."
  },
  "set_component_state": {
   "description": "Sets the suppression state (IComponent2.SetSuppression2: suppressed, lightweight, resolved, fully resolved) and / or visibility (IComponent2.Visible) of components of the active assembly, nested ones by instance path; all names are resolved before anything changes. Rebuilds (EditRebuild3), never saves. Increments state_version.",
@@ -913,7 +913,7 @@
     "keep_probe": "boolean (optional, default false - leave the probe component in the assembly)"
    }
   },
-  "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, warning?, clear, probe_component?, note?, cleanup}"
+  "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, warning?, clear, probe_component?, note?, cleanup} ignored / ignored_hits / ignored_violations: hits of ignored components, located on the path like the others but left out of `clear`."
  },
  "import_step": {
   "description": "Imports a neutral file (STEP / IGES / Parasolid / SAT) through open_document's staged import, saves the import as a .SLDPRT (IModelDocExtension.SaveAs3; an assembly import becomes a multi-body part), closes the import document (ISldWorks.CloseDoc) and reopens the saved part (OpenDoc6) as the active document, so part queries work on it. Refuses to overwrite an existing part unless overwrite. Increments state_version.",
@@ -935,10 +935,12 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "route": "string (optional - a route sub-assembly instance to read wires and segments from)",
-    "verbose": "boolean (optional, default false - every routing library location and the from-to header definitions)"
+    "verbose": "boolean (optional, default false - every routing library location and the from-to header definitions)",
+    "connectors": "string (optional - JSON list of component names / instance paths, or a name fragment: their reference designator and connection points (pin, location, direction, stub end) in the active assembly's coordinates)",
+    "terminations": "string (optional - JSON {\"<REF>.<pin>\" | \"<REF>\" | \"*\": allowance_mm | {allowance_mm, strip_mm, ...}}: per-end wire length beyond the route end; adds termination and total_cut_length_mm to each wire)"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm}], cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
+  "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, connectors?:[{component, reference?, connection_points[{name, pin, location_mm, direction, stub_mm, stub_end_mm}]}], route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm, termination?{from, to}, total_cut_length_mm?}], terminations?, terminations_missing?, cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
  },
  "add_routing_point": {
   "description": "Active part: a 3D sketch point, then a connection point (FeatureManager.InsertConnectionPoint, electrical, face mark 1 + point mark 1) or a route point (InsertRoutePoint), and/or the Routing component type (IRoutingComponentManager.SetComponentType + SetComponentRouteTypeToCustomProperty(electrical)). Increments state_version.",
@@ -961,6 +963,40 @@
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {routing, sketch, inserted, feature, feature_type, routing_points, routing_component, warnings?}"
+ },
+ "connector_cavities": {
+  "description": "Read-only, active part (a connector housing): the openings (inner loops) of the planar wire-exit face(s) whose outward normal is `direction`, the openings of the most common size taken as cavities and sorted into a grid as seen from the wire side (IFace2.GetLoops, edge tessellation); optional numbering gives each cavity its pin number. Does NOT change state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "direction": "string (required - JSON [x,y,z], outward normal of the wire-exit face, part coordinates)",
+    "up": "string (optional - JSON [x,y,z], the view's up, e.g. the latch side)",
+    "numbering": "string (optional - JSON {first: top_left|top_right|bottom_left|bottom_right, along: row|column, start: 1})",
+    "exit_depth": "number (optional, default 0.001 m - faces within this of the outermost are searched too)",
+    "min_size": "number (optional, default 0.0005 m - smaller openings are not cavities)",
+    "size_tolerance": "number (optional, default 0.2 - relative size match to the most common opening)",
+    "expected_count": "integer (optional - warn when the cavity count differs)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {document, direction, view_right, view_up, face_indices, face_height_mm, cavity_count, rows, columns, row_pitch_mm, column_pitch_mm, cavity_size_mm, numbering?, cavities[{pin?, row, col, face_index, u_mm, v_mm, width_mm, height_mm, point}], pins?[{pin, point}], other_openings, warnings?}"
+ },
+ "add_connector_pins": {
+  "description": "Active part (a connector housing): one electrical connection point per pin at its cavity on the wire-exit face (one 3D sketch of points, FeatureManager.InsertConnectionPoint with the face, recreated reversed if it points into the housing), each named <prefix><pin> and given its pin number (IConnectionPointFeatureData.ElectricalPinID via ModifyDefinition); optionally deletes the existing connection points first; sets the Routing component type to connector (electrical). Bumps state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "pins": "string (required - JSON [{pin, point:[x,y,z]}] m, part coordinates)",
+    "direction": "string (required - JSON [x,y,z], outward normal of the wire-exit face)",
+    "stub_length": "number (optional, default 0.005 m)",
+    "replace_existing": "boolean (optional, default false - delete existing connection points and their sketches first)",
+    "name_prefix": "string (optional, default 'CPoint_')",
+    "face_index": "integer (optional - the exit face; default the largest outermost face along direction)",
+    "exit_depth": "number (optional, default 0.001 m)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {document, deleted?, exit_face, face_height_mm, sketch, connection_points[{pin, point, feature, pin_id, direction, location, stub_mm, error?}], created, warnings?}; Status FAILED with code PARTIAL when a point was not created"
  },
  "import_from_to": {
   "description": "Active assembly: sets component references (IComponent2.ComponentReference), fills empty from-to header definitions (IRoutingSettings.SetFromToListHeaderDefinitions), IRouteManager.ImportFromToList, RunCommand(PmOK) for the pages it opens, finds the new route sub-assembly, optionally IAutoRoute.ConvertGuidelinesToRoute, IElectricalRoute.RouteWires, and reads the route back. Increments state_version.",

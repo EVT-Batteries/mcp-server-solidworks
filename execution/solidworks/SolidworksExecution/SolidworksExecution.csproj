@@ -116,6 +116,7 @@
     <Compile Include="Services\SolidWorksService.Interference.cs" />
     <Compile Include="Services\SolidWorksService.Import.cs" />
     <Compile Include="Services\SolidWorksService.Routing.cs" />
+    <Compile Include="Services\SolidWorksService.ConnectorPins.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

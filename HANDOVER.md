@@ -118,6 +118,46 @@ route network, with how they were worked around and what would remove them. Most
 | j | `measure_curves(as_route=True)` fails on branched route sketches ("not one connected chain"). | Graph reconstruction outside | Return one route per branch for branched sketches. |
 | k | `RouteWires` attached four wires to the wrong connector (`mismatched_to_component`); `SetRoutePathForWire` refused the fix. | Lengths taken from the layout instead | Report `mismatched_*` wires with the component SOLIDWORKS attached them to (needs an API to read it), so the cause can be found. |
 
+Done 2026-11-14 (session 3, tested live): **c** (`routing_status(connectors=...)`: each
+connection point's pin, location, direction and stub end in assembly coordinates), **e**
+(`check_path_clearance` reports `ignored_hits` / `ignored_violations`, located on the path),
+**h** (`analyze_model(faces|edges, near=...)` ranks faces by bounding box first and builds the
+full record only for the nearest max(4k, 200); `analyze_model` is a long tool in the adapter),
+**i** (`component_status` gives `reference`). Still open: a, b, d, f, g, j, k.
+
+### 7. Per-cavity connectors and cut lengths (2026-11-14, session 3)
+
+A connector modelled with one connection point makes all its wires meet in one point: no
+fan-out, no bend or clearance check behind the housing, and SOLIDWORKS has no pin to match a
+wire end to (it attached four wires of a 12-way connector to other connectors). Done:
+
+| Tool | Change | Tested |
+|---|---|---|
+| `connector_cavities` (new, read-only) | the inner loops of the planar wire-exit face(s) along `direction` (edges tessellated, circles sampled), the openings of the most common size taken as cavities (latch windows, key slots, moulded text left in `other_openings`), sorted into rows / columns in the frame of a viewer at the wire side (`up` hint), numbered with `numbering={first, along, start}`; returns `pins` for `add_connector_pins` | an 8-way 2 x 4 housing: 8 cavities 1.7 x 2.25 mm, pitches 2.0 / 2.5 mm, pin 1 where the moulded digits put it |
+| `add_connector_pins` (new) | one 3D sketch of the pin points (projected onto the exit face), one `InsertConnectionPoint` per pin (recreated reversed if it points into the housing), `ElectricalPinID` = pin through `GetDefinition` / `ModifyDefinition`, feature `<prefix><pin>`; `replace_existing` deletes the old points and the point-only sketches they used; sets the component type | 8 points, pin IDs read back after a rebuild; a from-to import made one stub per USED cavity, and the wires routed through their own cavities with no error |
+| `routing_status(terminations=...)` | per-end allowances (`"<REF>.<pin>"` / `"<REF>"` / `"*"`) added to each wire: `termination {from, to}`, `total_cut_length_mm`, `terminations_missing` | 632.49 mm routed + 2 x 7.6 mm = 647.69 mm |
+| `routing_status` on a part | `connection_points` with pin, port, location, direction, stub | |
+
+Lessons: `ModifyDefinition` of a connection point returns false, yet the pin ID is kept (read it
+back after a rebuild); SOLIDWORKS also sets `PortID` to the pin. A connection point's
+`GetParents` does not list its point sketch: find point-only sketches whose children are the
+points. The point may lie in a cavity opening (off the face material); the face only gives the
+direction.
+
+Ideas from this session (open):
+
+- **Fan-out in one call:** `route_path(fan_out={join: [x,y,z], from: [[component, pin], ...]})`
+  drawing each cavity's stub end to the join node; today one call per wire.
+- **Coverings:** a SOLIDWORKS Routing covering (`ICovering`, covering library) on route
+  segments, so the bundle OD and the sleeve's start / end offsets are in the model; today only
+  `check_path_clearance(diameter=...)` uses the finished OD.
+- **Placement check for connectors:** report, per mated connector, which face of the plug sits
+  in the header (the face with the connection points must point away): two plugs sat backwards
+  for weeks because their single point was on the mating face.
+- **Stale adapter:** a new parameter is dropped silently by an adapter started before it
+  existed (`routing_status(connectors=...)` returned nothing); have the adapter warn about
+  unknown parameters, or compare its contract hash with the execution server's.
+
 ### 4. Smaller things noticed
 
 - **Clearance of multi-body components (fixed).** `IMeasure` on two selected components looked

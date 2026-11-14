@@ -385,6 +385,9 @@ namespace SolidworksExecution.Services
             };
             if (!FileExists(c)) j["file_missing"] = true;
             try { j["configuration"] = c.ReferencedConfiguration; } catch { }
+            // Reference designator (Component Properties > Component Reference): what a routing
+            // from-to import matches its From / To Ref against.
+            try { string rf = c.ComponentReference; if (!string.IsNullOrEmpty(rf)) j["reference"] = rf; } catch { }
             if (state != "suppressed")
             {
                 int v = SafeVisible(c);

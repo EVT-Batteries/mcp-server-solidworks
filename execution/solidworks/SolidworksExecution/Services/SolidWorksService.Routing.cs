@@ -161,6 +161,7 @@ namespace SolidworksExecution.Services
                 if (asm == null)
                 {
                     result["routing_points"] = RoutingFeaturesOf(doc);
+                    result["connection_points"] = new JArray(ConnectionPointsOf(doc));
                     result["routing_component"] = RoutingComponentInfo(doc);
                     return ReadOnlyResponse(request, doc, result);
                 }
@@ -195,13 +196,49 @@ namespace SolidworksExecution.Services
                     }
                 result["route_assemblies"] = routes;
 
+                // connectors: their connection points (pin, location, direction, stub end) in this
+                // assembly's coordinates, for starting route branches on the stub ends as they are
+                // NOW (a plug moved in another configuration once left a plan 2.5 mm off).
+                var connTok = p?["connectors"];
+                if (connTok != null && connTok.Type != JTokenType.Null && !(connTok.Type == JTokenType.String && string.IsNullOrWhiteSpace((string)connTok)))
+                {
+                    var conns = new JArray();
+                    var names = new List<string>();
+                    string fragment = null;
+                    if (connTok.Type == JTokenType.String && ((string)connTok).TrimStart().StartsWith("["))
+                        names = JArray.Parse((string)connTok).Select(t => (string)t).ToList();
+                    else if (connTok is JArray ca) names = ca.Select(t => (string)t).ToList();
+                    else fragment = (string)connTok;
+                    var comps = new List<IComponent2>();
+                    foreach (var n in names)
+                    {
+                        var c = FindComponentByName(asm, n);
+                        if (c == null) conns.Add(new JObject { ["component"] = n, ["error"] = "not found" });
+                        else comps.Add(c);
+                    }
+                    if (fragment != null && asm.GetComponents(false) is object[] allc)
+                        foreach (var co in allc)
+                            if (co is IComponent2 c2 && (c2.Name2 ?? "").IndexOf(fragment, StringComparison.OrdinalIgnoreCase) >= 0
+                                && c2.GetSuppression2() != 0 && c2.GetModelDoc2() is IPartDoc)
+                                comps.Add(c2);
+                    foreach (var c in comps)
+                    {
+                        var cj = ConnectorPointsWorld(c);
+                        if (cj != null) conns.Add(cj);
+                    }
+                    result["connectors"] = conns;
+                }
+
                 if (!string.IsNullOrEmpty(routeName))
                 {
                     var comp = FindComponentByName(asm, routeName);
                     if (comp == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "COMPONENT_NOT_FOUND", ComponentNotFoundMessage(asm, routeName));
-                    result["route"] = ReadElectricalRoute(doc, asm, comp);
+                    var rj = ReadElectricalRoute(doc, asm, comp);
+                    var terms = ParseTerminations(p?["terminations"]);
+                    if (terms != null) ApplyTerminations(rj, terms);
+                    result["route"] = rj;
                 }
                 return ReadOnlyResponse(request, doc, result);
             }
@@ -328,6 +365,59 @@ namespace SolidworksExecution.Services
         private static string SafeStr(Func<string> f)
         {
             try { return f() ?? ""; } catch { return ""; }
+        }
+
+        // terminations: {"<ref>.<pin>" | "<ref>" | "*": allowance_mm | {"allowance_mm": a,
+        // "strip_mm": s, ...}}. The allowance is the wire length beyond the route end at a
+        // connection point (housing rear face -> conductor end in the crimp: insulation inside the
+        // housing + the stripped length); the most specific key wins.
+        private static JObject ParseTerminations(JToken tok)
+        {
+            if (tok == null || tok.Type == JTokenType.Null) return null;
+            JObject o = tok.Type == JTokenType.String
+                ? (string.IsNullOrWhiteSpace((string)tok) ? null : JObject.Parse((string)tok))
+                : tok as JObject;
+            if (o == null || o.Count == 0) return null;
+            var norm = new JObject();
+            foreach (var kv in o)
+                norm[kv.Key] = kv.Value.Type == JTokenType.Object ? kv.Value : new JObject { ["allowance_mm"] = kv.Value };
+            return norm;
+        }
+
+        private static JObject TerminationFor(JObject terms, string end)
+        {
+            if (string.IsNullOrEmpty(end)) return null;
+            int dot = end.LastIndexOf('.');
+            string reference = dot > 0 ? end.Substring(0, dot) : end;
+            foreach (var key in new[] { end, reference, "*" })
+                foreach (var kv in terms)
+                    if (string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)) return (JObject)kv.Value;
+            return null;
+        }
+
+        // Adds to each wire of a route read: termination {from, to} and total_cut_length_mm = SOLIDWORKS
+        // cut length (route end to route end, stubs included) + both allowances; wires with an end
+        // that has no termination entry are listed in terminations_missing.
+        private static void ApplyTerminations(JObject route, JObject terms)
+        {
+            if (!(route["wires"] is JArray wires)) return;
+            var missing = new JArray();
+            foreach (var w in wires.OfType<JObject>())
+            {
+                var tf = TerminationFor(terms, (string)w["from"]);
+                var tt = TerminationFor(terms, (string)w["to"]);
+                var tj = new JObject();
+                if (tf != null) tj["from"] = tf;
+                if (tt != null) tj["to"] = tt;
+                w["termination"] = tj;
+                if (tf == null || tt == null) { missing.Add((string)w["name"]); continue; }
+                double cut = w.Value<double?>("cut_length_mm") ?? 0;
+                if (cut <= 0) continue;   // unrouted: no total
+                double a = tf.Value<double?>("allowance_mm") ?? 0, b = tt.Value<double?>("allowance_mm") ?? 0;
+                w["total_cut_length_mm"] = Math.Round(cut + a + b, 2);
+            }
+            route["terminations"] = terms;
+            if (missing.Count > 0) route["terminations_missing"] = missing;
         }
 
         public ExecutionResponse AddRoutingPoint(ToolRequest request)

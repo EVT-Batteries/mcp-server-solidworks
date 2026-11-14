@@ -1482,6 +1482,11 @@ namespace SolidworksExecution.Services
             var facesArr = new JArray();
             int idx = 0;
             object[] bodies = partDoc.GetBodies2((int)swBodyType_e.swSolidBody, true) as object[];
+            // With `near`, rank faces by the distance from `near` to their bounding box first (cheap)
+            // and build the full face record only for the nearest candidates: building it for all
+            // 4000 faces of a board model ran past the adapter's 30 s timeout. A face's true point
+            // is never nearer than its box, so the k nearest are among the first max(4k, 200) boxes.
+            var all = new List<(IFace2 face, int i, double boxDist)>();
             if (bodies != null)
             {
                 foreach (var b in bodies)
@@ -1494,12 +1499,35 @@ namespace SolidworksExecution.Services
                     {
                         var face = f as IFace2;
                         if (face == null) continue;
-                        facesArr.Add(BuildFaceJson(face, idx++));
+                        double bd = 0;
+                        if (near != null)
+                        {
+                            bd = double.MaxValue;
+                            try
+                            {
+                                if (face.GetBox() is double[] fb && fb.Length >= 6)
+                                {
+                                    double dx = Math.Max(0, Math.Max(fb[0] - near[0], near[0] - fb[3]));
+                                    double dy = Math.Max(0, Math.Max(fb[1] - near[1], near[1] - fb[4]));
+                                    double dz = Math.Max(0, Math.Max(fb[2] - near[2], near[2] - fb[5]));
+                                    bd = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                                }
+                            }
+                            catch { }
+                        }
+                        all.Add((face, idx++, bd));
                     }
                 }
             }
+            IEnumerable<(IFace2 face, int i, double boxDist)> chosen = all;
+            if (near != null)
+            {
+                int keep = k > 0 ? Math.Max(4 * k, 200) : int.MaxValue;
+                chosen = all.OrderBy(t => t.boxDist).Take(keep).OrderBy(t => t.i);
+            }
+            foreach (var t in chosen) facesArr.Add(BuildFaceJson(t.face, t.i));
             ExecLog.Write($"ReadFaces: faces={facesArr.Count} near={(near != null)} k={k}");
-            int totalCount = facesArr.Count;
+            int totalCount = all.Count;
 
             if (near != null)
             {

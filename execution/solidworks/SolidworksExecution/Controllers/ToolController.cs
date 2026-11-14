@@ -251,6 +251,8 @@ namespace SolidworksExecution.Controllers
                 case "save_body_as_part":      return _service.SaveBodyAsPart(request);
                 case "routing_status":         return _service.RoutingStatus(request);
                 case "add_routing_point":      return _service.AddRoutingPoint(request);
+                case "connector_cavities":     return _service.ConnectorCavities(request);
+                case "add_connector_pins":     return _service.AddConnectorPins(request);
                 case "start_route":            return _service.StartRoute(request);
                 case "route_path":             return _service.RoutePath(request);
                 case "import_from_to":         return _service.ImportFromTo(request);

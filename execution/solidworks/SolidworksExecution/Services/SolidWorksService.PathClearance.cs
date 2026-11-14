@@ -132,14 +132,19 @@ namespace SolidworksExecution.Services
                 var ir = JObject.Parse(inner.CadState.Features[0]);
 
                 // 4. Hits mapped onto the path: the leg nearest to the centre of each overlap box.
+                // Ignored components are not dropped silently: a broad ignore fragment once hid a
+                // real 14 mm3 clash with the harness's own receptacle. Their hits are located on the
+                // path like the others and listed apart (ignored_hits / ignored_violations), so the
+                // caller sees WHERE an ignored part touches the path and how much.
                 var hits = new List<JObject>();
+                var ignoredHits = new List<JObject>();
                 int ignoredCount = 0;
                 if (ir["interferences"] is JArray ints)
                     foreach (var t in ints)
                     {
                         var other = (t["components"] as JArray)?.Select(x => (string)x)
                             .FirstOrDefault(x => !x.StartsWith(probeName, StringComparison.OrdinalIgnoreCase)) ?? "?";
-                        if (ignore.Any(g => other.IndexOf(g, StringComparison.OrdinalIgnoreCase) >= 0)) { ignoredCount++; continue; }
+                        bool ignored = ignore.Any(g => other.IndexOf(g, StringComparison.OrdinalIgnoreCase) >= 0);
                         var h = new JObject { ["component"] = other, ["volume_mm3"] = t["volume_mm3"] };
                         if (t["box_min"] is JArray bmin && t["box_max"] is JArray bmax)
                         {
@@ -147,15 +152,18 @@ namespace SolidworksExecution.Services
                             h["box_mm"] = new JArray(new[] { bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2] }.Select(v => Math.Round((double)v * 1000, 1)));
                             LocateOnPaths(paths, c, h);
                         }
-                        hits.Add(h);
+                        if (ignored) { ignoredCount++; ignoredHits.Add(h); }
+                        else hits.Add(h);
                     }
                 var violations = new JArray();
+                var ignoredViolations = new JArray();
                 if (ir["clearance"]?["violations"] is JArray vs)
                     foreach (var v in vs)
                     {
                         string other = (string)v["b"];
-                        if (ignore.Any(g => other.IndexOf(g, StringComparison.OrdinalIgnoreCase) >= 0)) { ignoredCount++; continue; }
-                        violations.Add(new JObject { ["component"] = other, ["distance_mm"] = v["distance_mm"] });
+                        var vj = new JObject { ["component"] = other, ["distance_mm"] = v["distance_mm"] };
+                        if (ignore.Any(g => other.IndexOf(g, StringComparison.OrdinalIgnoreCase) >= 0)) { ignoredCount++; ignoredViolations.Add(vj); continue; }
+                        violations.Add(vj);
                     }
 
                 var result = new JObject
@@ -178,7 +186,13 @@ namespace SolidworksExecution.Services
                     }
                     if (ir["clearance"]?["not_measured_neighbours"] != null) result["not_measured_neighbours"] = ir["clearance"]["not_measured_neighbours"];
                 }
-                if (ignoredCount > 0) result["ignored"] = ignoredCount;
+                if (ignoredCount > 0)
+                {
+                    result["ignored"] = ignoredCount;
+                    if (ignoredHits.Count > 0)
+                        result["ignored_hits"] = new JArray(ignoredHits.OrderByDescending(h => h.Value<double>("volume_mm3")).Take(limit));
+                    if (ignoredViolations.Count > 0) result["ignored_violations"] = ignoredViolations;
+                }
                 foreach (var k in new[] { "warning", "lightweight_not_checked", "resolved_from_lightweight_count" })
                     if (ir[k] != null) result[k] = ir[k];
                 if (buildWarnings.Count > 0) result["path_warnings"] = buildWarnings;

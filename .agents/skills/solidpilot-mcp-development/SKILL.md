@@ -336,6 +336,18 @@ Results are in `$r.cadState.features` (often one JSON string).
   - **Exit faces**: terminal tips and ribs often stand a fraction of a mm proud of a connector's
     rear face. Pick the largest planar face within ~1 mm of the outermost one along the exit
     direction, not the outermost face.
+- **Connection points per pin (2026-11-14)**: `IFeatureManager.InsertConnectionPoint`'s string
+  arguments are the ribbon-cable schematic pin and pipe specification, not the electrical pin.
+  The pin is `IConnectionPointFeatureData.ElectricalPinID` (and `PortID`), set on
+  `feature.GetDefinition()` then `feature.ModifyDefinition(def, doc, null)`: it returned false
+  every time, yet the value was kept (read it back after a rebuild). `Location` / `Direction`
+  are `double[]` in part coordinates. A connection point's `GetParents()` did not list its
+  point sketch. Face loops: `IFace2.GetLoops()` -> `ILoop2.IsOuter()` / `GetEdges()`;
+  `IEdge.GetCurveParams3()` (`CurveParamData.StartPoint` / `EndPoint`) and
+  `ICurve.GetTessPts(chord, length, start, end)`; full circles from `ICurve.CircleParams`.
+- **Testing a new parameter before the MCP restart**: the running adapter drops parameters it
+  does not know without an error (the call succeeds without them). Call the execution server
+  directly (`SwCall` above) until the MCP is restarted.
 
 ## Committing
 
