@@ -280,9 +280,11 @@ namespace SolidworksExecution.Services
         // Returns the legs [stub end, corner, join] with their radius, and fills join / report.
         private static List<Tuple<int, List<double[]>, double>> SmoothFanLegs(
             List<double[]> ends, List<double[]> dirs, double[] b, double[] givenJoin, double r, double maxLegDeg,
-            double layerStep, double lead, out double[] join, JObject report)
+            double layerStep, double lead, out double[] join, JObject report, bool? concentricOpt = null, double autoSpan = 0.008)
         {
             int n = ends.Count;
+            var rk = Enumerable.Repeat(r, n).ToArray();
+            bool concentric = false;
             double[] dm = Unit(new[] { dirs.Average(q => q[0]), dirs.Average(q => q[1]), dirs.Average(q => q[2]) });
             b = Unit(b ?? dm);
             bool turn = Dot(b, dm) < Math.Cos(30 * Math.PI / 180);
@@ -298,18 +300,39 @@ namespace SolidworksExecution.Services
                 var levels = new List<double>();
                 foreach (var pv in proj.OrderByDescending(x => x))
                     if (levels.Count == 0 || levels.Last() - pv > 5e-4) levels.Add(pv);
-                double s0 = r * Math.Tan((90 + maxLegDeg) / 2 * Math.PI / 180) + lead;
-                for (int k = 0; k < n; k++)
+                // Concentric unless the cavities spread wide along the turn (a long row turning edgewise
+                // would need radii up to its width): auto = span along b <= autoSpan.
+                double span = proj.Max() - proj.Min();
+                concentric = concentricOpt ?? span <= autoSpan + 1e-9;
+                report["span_along_turn_mm"] = Math.Round(span * 1000, 2);
+                if (concentric)
                 {
-                    int rank = levels.FindIndex(l => Math.Abs(l - proj[k]) <= 5e-4);
-                    s[k] = s0 + Math.Max(0, rank) * layerStep;
+                    // Concentric ribbon: every leg starts its bend right after the stub (lead), the
+                    // radius growing by the cavity's offset from the inside of the turn, so the wires
+                    // turn together and leave the bend side by side instead of running out staggered.
+                    double pmax = proj.Max();
+                    for (int k = 0; k < n; k++)
+                    {
+                        rk[k] = r + Math.Max(0, pmax - proj[k]);
+                        s[k] = lead + rk[k] * Math.Tan((90 + maxLegDeg) / 2 * Math.PI / 180);
+                    }
+                }
+                else
+                {
+                    double s0 = r * Math.Tan((90 + maxLegDeg) / 2 * Math.PI / 180) + lead;
+                    for (int k = 0; k < n; k++)
+                    {
+                        int rank = levels.FindIndex(l => Math.Abs(l - proj[k]) <= 5e-4);
+                        s[k] = s0 + Math.Max(0, rank) * layerStep;
+                    }
                 }
             }
             else for (int k = 0; k < n; k++) s[k] = lead;
+            bool exact = turn && concentric;
 
             double[][] corners = new double[n][];
             join = givenJoin;
-            for (int iter = 0; iter < 4; iter++)
+            for (int iter = 0; iter < (exact ? 12 : 4); iter++)
             {
                 for (int k = 0; k < n; k++) corners[k] = Add(ends[k], Scale(dirs[k], s[k]));
                 if (givenJoin == null)
@@ -336,7 +359,7 @@ namespace SolidworksExecution.Services
                         {
                             var toJ = Sub(jn, corners[k]);
                             double phi = Ang(dirs[k], toJ);
-                            ok = Math.Sqrt(Dot(toJ, toJ)) >= r * Math.Tan(phi / 2 * Math.PI / 180) + lead;
+                            ok = Math.Sqrt(Dot(toJ, toJ)) >= rk[k] * Math.Tan(phi / 2 * Math.PI / 180) + lead;
                         }
                         if (ok) break;
                         d += 0.0005;
@@ -348,8 +371,9 @@ namespace SolidworksExecution.Services
                 for (int k = 0; k < n; k++)
                 {
                     double phi = Ang(dirs[k], Sub(join, corners[k]));
-                    double t = r * Math.Tan(phi / 2 * Math.PI / 180);
-                    if (s[k] < t + lead - 1e-7) { s[k] = t + lead; changed = true; }
+                    double t = rk[k] * Math.Tan(phi / 2 * Math.PI / 180);
+                    if (exact) { if (Math.Abs(s[k] - (t + lead)) > 1e-7) { s[k] = t + lead; changed = true; } }
+                    else if (s[k] < t + lead - 1e-7) { s[k] = t + lead; changed = true; }
                 }
                 if (!changed) break;
             }
@@ -363,14 +387,16 @@ namespace SolidworksExecution.Services
                 var toJ = Sub(join, c);
                 if (Math.Sqrt(Dot(toJ, toJ)) < 1e-6) continue;
                 double arrive = Ang(toJ, b), bend = Ang(dirs[k], toJ);
-                double t = r * Math.Tan(bend / 2 * Math.PI / 180);
+                double t = rk[k] * Math.Tan(bend / 2 * Math.PI / 180);
                 double len = s[k] + Math.Sqrt(Dot(toJ, toJ));
                 steepest = Math.Max(steepest, arrive); worstBend = Math.Max(worstBend, bend); longest = Math.Max(longest, len);
-                legs.Add(Tuple.Create(k, new List<double[]> { ends[k], c, join }, r));
+                legs.Add(Tuple.Create(k, new List<double[]> { ends[k], c, join }, rk[k]));
                 lj.Add(new JObject
                 {
                     ["k"] = k,
                     ["straight_out_mm"] = Math.Round(s[k] * 1000, 2),
+                    ["bend_starts_mm"] = Math.Round((s[k] - t) * 1000, 2),
+                    ["radius_mm"] = Math.Round(rk[k] * 1000, 2),
                     ["bend_deg"] = Math.Round(bend, 1),
                     ["arrival_deg"] = Math.Round(arrive, 1),
                     ["fillet_fits"] = t <= s[k] + 1e-7 && t <= Math.Sqrt(Dot(toJ, toJ)) + 1e-7,
@@ -379,6 +405,11 @@ namespace SolidworksExecution.Services
             report["shape"] = turn ? "turn" : "axial";
             report["bundle_direction"] = J3(b, 6);
             report["leg_radius_mm"] = Math.Round(r * 1000, 2);
+            report["concentric"] = exact;
+            if (exact)
+            {
+                report["leg_radius_max_mm"] = Math.Round(rk.Max() * 1000, 2);
+            }
             report["max_arrival_deg"] = Math.Round(steepest, 1);
             report["max_bend_deg"] = Math.Round(worstBend, 1);
             report["longest_leg_mm"] = Math.Round(longest * 1000, 2);

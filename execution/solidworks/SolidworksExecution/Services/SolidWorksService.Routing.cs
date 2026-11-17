@@ -1238,7 +1238,7 @@ namespace SolidworksExecution.Services
                             var legs = SmoothFanLegs(ends, dirs, turnDir, givenJoin,
                                 fo.Value<double?>("leg_radius") ?? 0.008, maxLegS,
                                 fo.Value<double?>("layer_step") ?? 0.0015, fo.Value<double?>("lead") ?? 0.0005,
-                                out join, shape);
+                                out join, shape, fo.Value<bool?>("concentric"), fo.Value<double?>("concentric_max_span") ?? 0.008);
                             foreach (var lg in legs)
                                 fanJobs.Add(Tuple.Create($"fan_out {cn} pin {pins[lg.Item1]}", lg.Item2, new[] { lg.Item3 }));
                             var rep = new JObject

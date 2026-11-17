@@ -99,6 +99,33 @@ namespace SolidworksExecution.Services
                                 CollectNear(asm, c, boxes, margin, targetPaths, includeHidden, near, skippedLight, 0);
                     result["checked"] = new JArray(targetPaths.ToArray());
                     result["neighbours_checked"] = near.Count;
+                    // Surface-only neighbours (no solid body): Interference Detection cannot see a clash
+                    // with them, so a "clear" result says nothing about them. Name them, and the solid
+                    // configuration their model offers, if any.
+                    var surfaceOnly = new JArray();
+                    var solidHints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var n in near)
+                    {
+                        if (!IsSurfaceOnly(n)) continue;
+                        surfaceOnly.Add(ComponentPath(n));
+                        try
+                        {
+                            if (n.GetModelDoc2() is IModelDoc2 nd && nd.GetConfigurationNames() is object[] cfgs)
+                                foreach (var cn in cfgs.OfType<string>())
+                                    if (cn.IndexOf("solid", StringComparison.OrdinalIgnoreCase) >= 0 && !string.Equals(cn, n.ReferencedConfiguration, StringComparison.OrdinalIgnoreCase))
+                                        solidHints.Add(System.IO.Path.GetFileName(nd.GetPathName()) + " -> '" + cn + "'");
+                        }
+                        catch { }
+                    }
+                    if (surfaceOnly.Count > 0)
+                    {
+                        result["surface_only_count"] = surfaceOnly.Count;
+                        result["surface_only_neighbours"] = new JArray(surfaceOnly.Take(compact ? 20 : 200).ToArray());
+                        result["surface_only_warning"] = surfaceOnly.Count + " neighbour(s) have no solid body: a clash with them is NOT detected. "
+                            + (solidHints.Count > 0
+                                ? "Switch them to their solid configuration first (set_component_state(<instances>, referenced_configuration=..., include_mates=False)), check, then switch back: " + string.Join("; ", solidHints)
+                                : "Give the model solid bodies (or a solid configuration) before trusting the check.");
+                    }
                     if (p?.Value<bool?>("boxes") ?? false)
                         result["neighbours"] = new JArray(near.Select(n =>
                         {
@@ -256,7 +283,7 @@ namespace SolidworksExecution.Services
                     result["warning"] = stillLight + " components are lightweight: SolidWorks may leave them out. Pass resolve_lightweight=true for a complete check.";
                 else if (skippedLight.Count > 0)
                     result["warning"] = skippedLight.Count + " lightweight components have no bounding box and were not checked. Pass resolve_lightweight=true to include them.";
-                result["clear"] = total == 0 && clearanceOk && !result.ContainsKey("warning");
+                result["clear"] = total == 0 && clearanceOk && !result.ContainsKey("warning") && !result.ContainsKey("surface_only_warning");
 
                 return ReadOnlyResponse(request, modelDoc, result);
             }
@@ -295,6 +322,19 @@ namespace SolidworksExecution.Services
         }
 
         // A component's bounding box in assembly coordinates [xmin,ymin,zmin,xmax,ymax,zmax], or null.
+        // True when the component's model has sheet (surface) bodies but no solid body (swSheetBody = 1,
+        // swSolidBody = 0): Interference Detection and Measure cannot see it.
+        private static bool IsSurfaceOnly(IComponent2 c)
+        {
+            try
+            {
+                object info;
+                if (c.GetBodies3(0, out info) is object[] solids && solids.Length > 0) return false;
+                return c.GetBodies3(1, out info) is object[] sheets && sheets.Length > 0;
+            }
+            catch { return false; }
+        }
+
         private static double[] ComponentBox(IComponent2 c)
         {
             try

@@ -240,3 +240,19 @@ Ideas (open):
   add the solid bodies of the same model; an `analyze_model` mode that reads surface bodies
   (bounding box per face, planes) would still help locate saddles and connector openings without
   re-importing.
+
+## Session 6 (clash checks that cannot see surface models, concentric fans, save warning)
+
+- `check_interference` / `check_path_clearance`: neighbours with sheet bodies but no solid body are
+  invisible to Interference Detection, and a check that met one still returned `clear: true`.
+  They now return `surface_only_count`, `surface_only_neighbours` and `surface_only_warning`
+  (naming a configuration of that model whose name contains "solid", if any) and `clear: false`.
+  Before: the warning only appeared with `clearance > 0` (`not_measured_neighbours`).
+- `route_path` fan_out turn fans: `concentric` (default auto: true when the used cavities span at
+  most `concentric_max_span`, 0.008 m, along the turn). Every leg starts its bend right after its
+  stub, radius leg_radius + its offset from the inside of the turn; legs report `bend_starts_mm`,
+  `radius_mm`; the fan reports `concentric`, `span_along_turn_mm`, `leg_radius_max_mm`. A long row
+  turning edgewise keeps the staggered fan (`layer_step`): concentric radii there grow to the row
+  width (a 22-way header: 50 mm, legs over 200 mm).
+- `save_document`: `warning` when other open documents stay modified (typically the parent / top
+  assembly a probe or configuration switch dirtied).

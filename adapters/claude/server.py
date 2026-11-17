@@ -394,6 +394,9 @@ def check_interference(
     box_min / box_max of the overlap, m), clearance {required_m, violations [{a, b,
     distance_mm}], nearest_m, nearest_pair}, neighbours_checked, warning when something could not
     be checked, and `clear` (true = no interference, no clearance violation, nothing skipped).
+    surface_only_neighbours / surface_only_warning (and clear=false): neighbours with no solid
+    body, invisible to Interference Detection; the warning names their solid configuration when
+    the model has one (switch with set_component_state(referenced_configuration=...), re-check).
     compact: on a large assembly, report counts instead of the long lists: not_measured_count +
     not_measured_neighbours (pairs Measure could not size, usually surface-only models) and
     resolved_from_lightweight_count. Not compact: also `neighbours` (the instance paths checked)
@@ -1788,7 +1791,7 @@ def route_path(
         each end snaps onto the route or onto an end of an earlier polyline of the call.
     fan_out: JSON [{"connector": instance, "pins"?: [...], "join"?: [x,y,z], "turn"?: [dx,dy,dz],
         "leg_radius"?: m, "max_leg_angle_deg"?: deg, "layer_step"?: m, "lead"?: m,
-        "straight_legs"?: bool, "join_distance"?: m}] for connectors with one connection point per
+        "concentric"?: bool, "concentric_max_span"?: m, "straight_legs"?: bool, "join_distance"?: m}] for connectors with one connection point per
         cavity (add_connector_pins): one leg per used cavity (the stubs the from-to import put on
         the route, or the pins named) to a join node, drawn before points / paths so a branch can
         start on it. Each leg leaves its cavity straight along the cavity axis (no kink at the
@@ -1797,8 +1800,13 @@ def route_path(
         max_leg_angle_deg (default max_kink_deg - 1) of the bundle direction. turn: the bundle
         direction leaving the join (default the mean exit direction: an axial fan with gentle
         bends; across it: a turn fan for a plug facing a wall, the wires going straight out,
-        bending ~90 deg and converging, the cavities further upstream bending deeper by
-        layer_step (default 0.0015 = one wire layer) so legs do not run through each other).
+        bending ~90 deg and converging). concentric (default auto: true when the used cavities
+        span at most concentric_max_span = 0.008 m along the turn): every leg starts its bend
+        right after its stub (lead), radius leg_radius + the cavity's offset from the inside of
+        the turn, so the wires turn together as a ribbon close to the plug (legs report
+        bend_starts_mm and radius_mm). Otherwise (a long row turning edgewise) or
+        concentric=false: staggered, all legs at leg_radius, the cavities further upstream
+        bending deeper by layer_step (default 0.0015 = one wire layer).
         Without join it is placed past the corners, just far enough for the arrival angle and
         each bend. Start the bundle at the join along turn. straight_legs=true: the old straight
         legs (join_distance from the mean stub end, or from max_leg_angle_deg). Returns fan_out

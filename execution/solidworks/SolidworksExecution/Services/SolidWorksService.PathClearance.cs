@@ -193,10 +193,11 @@ namespace SolidworksExecution.Services
                         result["ignored_hits"] = new JArray(ignoredHits.OrderByDescending(h => h.Value<double>("volume_mm3")).Take(limit));
                     if (ignoredViolations.Count > 0) result["ignored_violations"] = ignoredViolations;
                 }
-                foreach (var k in new[] { "warning", "lightweight_not_checked", "resolved_from_lightweight_count" })
+                foreach (var k in new[] { "warning", "lightweight_not_checked", "resolved_from_lightweight_count",
+                                          "surface_only_count", "surface_only_neighbours", "surface_only_warning" })
                     if (ir[k] != null) result[k] = ir[k];
                 if (buildWarnings.Count > 0) result["path_warnings"] = buildWarnings;
-                result["clear"] = hits.Count == 0 && violations.Count == 0 && ir["warning"] == null;
+                result["clear"] = hits.Count == 0 && violations.Count == 0 && ir["warning"] == null && ir["surface_only_warning"] == null;
                 if (keep) result["probe_component"] = probeName;
                 if (!asmWasDirty && !keep)
                     result["note"] = "The assembly is now marked modified (a component was added and removed); its geometry is unchanged.";

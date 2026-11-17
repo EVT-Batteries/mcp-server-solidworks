@@ -788,6 +788,8 @@ namespace SolidworksExecution.Services
                     };
                     if (missingOnly.Count > 0) rep["not_open"] = missingOnly;
                     if (verbose || stillDirtyOnly.Count <= 20) rep["unsaved_open_documents_list"] = new JArray(stillDirtyOnly);
+                    if (stillDirtyOnly.Count > 0)
+                        rep["warning"] = stillDirtyOnly.Count + " other open document(s) are still modified: save them too before committing, or say why they stay unsaved.";
                     var rOnly = new ExecutionResponse
                     {
                         OperationId = request.OperationId,
@@ -911,6 +913,10 @@ namespace SolidworksExecution.Services
                 }
                 if (verbose || stillDirty.Count <= ListMax) report["unsaved_open_documents_list"] = stillDirty;
                 else report["unsaved_open_documents_list"] = new JArray(stillDirty.Take(ListMax));
+                if (stillDirty.Count > 0)
+                    report["warning"] = stillDirty.Count + " other open document(s) are still modified (often the parent / top "
+                        + "assembly: probes, configuration switches and lightweight resolves dirty it). Save them too "
+                        + "(activate + save_document, or save_document(documents=[...])) before committing, or say why they stay unsaved.";
                 var response = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
