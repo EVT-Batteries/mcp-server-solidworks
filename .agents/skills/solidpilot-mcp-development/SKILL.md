@@ -238,6 +238,15 @@ Results are in `$r.cadState.features` (often one JSON string).
     two segments of the wire sharing a terminal point = a node; the segment ids are not
     ordered along the wire, so match by points), and `route_path` checks the same before
     drawing (`SHARP_JUNCTION`).
+  - Coverings (2026-11-16, `SolidWorksService.RouteCovering.cs`): `IRouteProperty.CreateCovering`
+    then `AddCovering(cov)` attaches a copy; set Name / PartNumber / OuterDiameter / Color on
+    `GetCovering()` after adding (set before, OuterDiameter read back 0). `RemoveCovering()` has no
+    argument and returns void. Whole segments only: Split Route, Fixed Length Covering, Add Bends
+    and Repair Route are not in the Routing API.
+  - Lightweight connectors (large-assembly mode keeps 1000+ components lightweight even with
+    `OpenDoc7` LightWeight false) cannot be resolved by the wires' Component Reference: Edit Wires
+    shows "'From' or 'To' component was not found" and the wire paths are lost (magenta). Resolve
+    every component before reading or editing routes.
   - First real harnesses (2026-11-12): `ImportFromToList` also returns false when row 1 of the
     list holds text or a Pin cell is empty (an empty Partno is fine, but that connector gets no
     stub: `AddToRoute` its CPoint). `SetFromToListHeaderDefinitions` never keeps "other" and the

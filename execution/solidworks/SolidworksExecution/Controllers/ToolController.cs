@@ -255,6 +255,7 @@ namespace SolidworksExecution.Controllers
                 case "add_connector_pins":     return _service.AddConnectorPins(request);
                 case "start_route":            return _service.StartRoute(request);
                 case "route_path":             return _service.RoutePath(request);
+                case "route_covering":         return _service.RouteCovering(request);
                 case "import_from_to":         return _service.ImportFromTo(request);
                 case "route_guidelines":       return _service.RouteGuidelines(request);
                 default:                       return null;

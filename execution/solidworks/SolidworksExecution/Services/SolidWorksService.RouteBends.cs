@@ -269,6 +269,123 @@ namespace SolidworksExecution.Services
             return report;
         }
 
+        // Smooth fan-out legs. Each wire leaves its cavity straight along the cavity's exit direction
+        // (no kink at the stub end), bends once with leg_radius at a corner c_k, and runs straight to
+        // the join, arriving within maxLegDeg of the bundle direction b (the bundle then leaves the
+        // join along b). Axial fan (b = mean exit direction): the corner sits just past the stub end,
+        // the bend is gentle. Turn fan (b across the exit direction, e.g. a plug facing a wall): the
+        // legs go straight out, bend about 90 deg and converge; cavities further upstream along b bend
+        // deeper by layerStep, so a leg passing over a downstream cavity runs beyond its corner
+        // instead of through its wire (layered wires, as a real bundle forms).
+        // Returns the legs [stub end, corner, join] with their radius, and fills join / report.
+        private static List<Tuple<int, List<double[]>, double>> SmoothFanLegs(
+            List<double[]> ends, List<double[]> dirs, double[] b, double[] givenJoin, double r, double maxLegDeg,
+            double layerStep, double lead, out double[] join, JObject report)
+        {
+            int n = ends.Count;
+            double[] dm = Unit(new[] { dirs.Average(q => q[0]), dirs.Average(q => q[1]), dirs.Average(q => q[2]) });
+            b = Unit(b ?? dm);
+            bool turn = Dot(b, dm) < Math.Cos(30 * Math.PI / 180);
+            double tanMax = Math.Tan(maxLegDeg * Math.PI / 180);
+            double Ang(double[] u, double[] v) => Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(Unit(u), Unit(v))))) * 180 / Math.PI;
+
+            // Depth of each corner along its exit direction.
+            var s = new double[n];
+            if (turn)
+            {
+                // Rank by position along b: the most downstream cavities bend first (rank 0).
+                var proj = ends.Select(e => Dot(e, b)).ToList();
+                var levels = new List<double>();
+                foreach (var pv in proj.OrderByDescending(x => x))
+                    if (levels.Count == 0 || levels.Last() - pv > 5e-4) levels.Add(pv);
+                double s0 = r * Math.Tan((90 + maxLegDeg) / 2 * Math.PI / 180) + lead;
+                for (int k = 0; k < n; k++)
+                {
+                    int rank = levels.FindIndex(l => Math.Abs(l - proj[k]) <= 5e-4);
+                    s[k] = s0 + Math.Max(0, rank) * layerStep;
+                }
+            }
+            else for (int k = 0; k < n; k++) s[k] = lead;
+
+            double[][] corners = new double[n][];
+            join = givenJoin;
+            for (int iter = 0; iter < 4; iter++)
+            {
+                for (int k = 0; k < n; k++) corners[k] = Add(ends[k], Scale(dirs[k], s[k]));
+                if (givenJoin == null)
+                {
+                    // On the line through the corners' centre along b, past the most downstream corner,
+                    // far enough that every leg arrives within maxLegDeg of b and has room for its bend.
+                    double[] mc = { corners.Average(q => q[0]), corners.Average(q => q[1]), corners.Average(q => q[2]) };
+                    double front = corners.Max(c => Dot(Sub(c, mc), b));
+                    double Worst(double dd)
+                    {
+                        var jn = Add(mc, Scale(b, front + dd));
+                        return corners.Max(c => Ang(Sub(jn, c), b));
+                    }
+                    double lo = 0.0, hi = 0.3;
+                    if (Worst(hi) > maxLegDeg) lo = hi;
+                    else for (int it = 0; it < 50; it++) { double mid = (lo + hi) / 2; if (Worst(mid) > maxLegDeg) lo = mid; else hi = mid; }
+                    // Room on each leg for its bend before the join (0.5 mm steps).
+                    double d = hi;
+                    for (int guard = 0; guard < 600; guard++)
+                    {
+                        var jn = Add(mc, Scale(b, front + d));
+                        bool ok = true;
+                        for (int k = 0; k < n && ok; k++)
+                        {
+                            var toJ = Sub(jn, corners[k]);
+                            double phi = Ang(dirs[k], toJ);
+                            ok = Math.Sqrt(Dot(toJ, toJ)) >= r * Math.Tan(phi / 2 * Math.PI / 180) + lead;
+                        }
+                        if (ok) break;
+                        d += 0.0005;
+                    }
+                    join = Add(mc, Scale(b, front + d));
+                }
+                // Each corner must leave room for its own fillet on the straight out of the cavity.
+                bool changed = false;
+                for (int k = 0; k < n; k++)
+                {
+                    double phi = Ang(dirs[k], Sub(join, corners[k]));
+                    double t = r * Math.Tan(phi / 2 * Math.PI / 180);
+                    if (s[k] < t + lead - 1e-7) { s[k] = t + lead; changed = true; }
+                }
+                if (!changed) break;
+            }
+
+            var legs = new List<Tuple<int, List<double[]>, double>>();
+            var lj = new JArray();
+            double steepest = 0, worstBend = 0, longest = 0;
+            for (int k = 0; k < n; k++)
+            {
+                var c = Add(ends[k], Scale(dirs[k], s[k]));
+                var toJ = Sub(join, c);
+                if (Math.Sqrt(Dot(toJ, toJ)) < 1e-6) continue;
+                double arrive = Ang(toJ, b), bend = Ang(dirs[k], toJ);
+                double t = r * Math.Tan(bend / 2 * Math.PI / 180);
+                double len = s[k] + Math.Sqrt(Dot(toJ, toJ));
+                steepest = Math.Max(steepest, arrive); worstBend = Math.Max(worstBend, bend); longest = Math.Max(longest, len);
+                legs.Add(Tuple.Create(k, new List<double[]> { ends[k], c, join }, r));
+                lj.Add(new JObject
+                {
+                    ["k"] = k,
+                    ["straight_out_mm"] = Math.Round(s[k] * 1000, 2),
+                    ["bend_deg"] = Math.Round(bend, 1),
+                    ["arrival_deg"] = Math.Round(arrive, 1),
+                    ["fillet_fits"] = t <= s[k] + 1e-7 && t <= Math.Sqrt(Dot(toJ, toJ)) + 1e-7,
+                });
+            }
+            report["shape"] = turn ? "turn" : "axial";
+            report["bundle_direction"] = J3(b, 6);
+            report["leg_radius_mm"] = Math.Round(r * 1000, 2);
+            report["max_arrival_deg"] = Math.Round(steepest, 1);
+            report["max_bend_deg"] = Math.Round(worstBend, 1);
+            report["longest_leg_mm"] = Math.Round(longest * 1000, 2);
+            report["legs"] = lj;
+            return legs;
+        }
+
         // "fan_out <connector>" for a fan-out leg label ("fan_out <connector> pin <pin> start"), else null.
         private static string FanPrefix(string label)
         {

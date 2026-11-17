@@ -1227,7 +1227,33 @@ namespace SolidworksExecution.Services
                             return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "NO_USED_CAVITIES",
                                 $"fan_out: no stub of {cn} is on the route (import the from-to list first, or name the pins).");
                         double[] join;
-                        if (fo["join"] is JArray jj && jj.Count == 3) join = new[] { (double)jj[0], (double)jj[1], (double)jj[2] };
+                        double[] givenJoin = fo["join"] is JArray gj && gj.Count == 3 ? new[] { (double)gj[0], (double)gj[1], (double)gj[2] } : null;
+                        if (!(fo.Value<bool?>("straight_legs") ?? false))
+                        {
+                            // Smooth legs: straight out of each cavity, one bend of leg_radius, arriving
+                            // within max_leg_angle_deg of the bundle direction (turn, default the mean exit).
+                            double[] turnDir = ParseVec(fo["turn"]);
+                            double maxLegS = fo.Value<double?>("max_leg_angle_deg") ?? Math.Max(1.0, maxKinkDeg - 1.0);
+                            var shape = new JObject();
+                            var legs = SmoothFanLegs(ends, dirs, turnDir, givenJoin,
+                                fo.Value<double?>("leg_radius") ?? 0.008, maxLegS,
+                                fo.Value<double?>("layer_step") ?? 0.0015, fo.Value<double?>("lead") ?? 0.0005,
+                                out join, shape);
+                            foreach (var lg in legs)
+                                fanJobs.Add(Tuple.Create($"fan_out {cn} pin {pins[lg.Item1]}", lg.Item2, new[] { lg.Item3 }));
+                            var rep = new JObject
+                            {
+                                ["connector"] = ComponentPath(c),
+                                ["pins"] = pins,
+                                ["join"] = J3(join, 7),
+                                ["join_mm"] = J3(Scale(join, 1000), 3),
+                            };
+                            foreach (var kv in shape) rep[kv.Key] = kv.Value;
+                            fanReport.Add(rep);
+                            steps.Add($"fan_out {cn}: {shape["shape"]} fan, join at {rep["join_mm"].ToString(Newtonsoft.Json.Formatting.None)} mm, legs arrive within {shape["max_arrival_deg"]} deg, bends up to {shape["max_bend_deg"]} deg at r {shape["leg_radius_mm"]} mm");
+                            continue;
+                        }
+                        if (givenJoin != null) join = givenJoin;
                         else
                         {
                             // join_distance given: that; else the shortest distance that keeps every

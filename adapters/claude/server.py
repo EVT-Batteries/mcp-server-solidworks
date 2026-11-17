@@ -1786,15 +1786,25 @@ def route_path(
     paths: JSON [{"name"?, "points": [[x,y,z], ...], "bend_radii"?: [...] | "bend_radius"?: r}, ...]
         more polylines drawn in the same route edit after points (a whole route in one call);
         each end snaps onto the route or onto an end of an earlier polyline of the call.
-    fan_out: JSON [{"connector": instance, "join"?: [x,y,z], "join_distance"?: m,
-        "max_leg_angle_deg"?: deg, "pins"?: [...]}] for connectors with one connection point per
-        cavity (add_connector_pins): one straight leg from each used cavity's stub end (the stubs
-        the from-to import put on the route, or the pins named) to a join node, drawn before
-        points / paths so a branch can start on it. Without join / join_distance the join sits
-        on the mean exit axis just far enough out that every leg stays within max_leg_angle_deg
-        (default max_kink_deg) of its stub (a wide plug needs a longer fan). Start the bundle
-        from the join along that axis. Returns fan_out [{connector, pins, join (m), join_mm,
-        longest_leg_mm, max_leg_angle_deg}]; a dry run returns the joins too.
+    fan_out: JSON [{"connector": instance, "pins"?: [...], "join"?: [x,y,z], "turn"?: [dx,dy,dz],
+        "leg_radius"?: m, "max_leg_angle_deg"?: deg, "layer_step"?: m, "lead"?: m,
+        "straight_legs"?: bool, "join_distance"?: m}] for connectors with one connection point per
+        cavity (add_connector_pins): one leg per used cavity (the stubs the from-to import put on
+        the route, or the pins named) to a join node, drawn before points / paths so a branch can
+        start on it. Each leg leaves its cavity straight along the cavity axis (no kink at the
+        stub end), bends once with leg_radius (default 0.008; use the wire's minimum bend radius
+        + its own radius or more) and runs straight to the join, arriving within
+        max_leg_angle_deg (default max_kink_deg - 1) of the bundle direction. turn: the bundle
+        direction leaving the join (default the mean exit direction: an axial fan with gentle
+        bends; across it: a turn fan for a plug facing a wall, the wires going straight out,
+        bending ~90 deg and converging, the cavities further upstream bending deeper by
+        layer_step (default 0.0015 = one wire layer) so legs do not run through each other).
+        Without join it is placed past the corners, just far enough for the arrival angle and
+        each bend. Start the bundle at the join along turn. straight_legs=true: the old straight
+        legs (join_distance from the mean stub end, or from max_leg_angle_deg). Returns fan_out
+        [{connector, pins, join, join_mm, shape, bundle_direction, leg_radius_mm, max_arrival_deg,
+        max_bend_deg, longest_leg_mm, legs[{straight_out_mm, bend_deg, arrival_deg,
+        fillet_fits}]}]; a dry run returns the joins and legs too.
     exit_route=False keeps the route open for the next bundle; the last call exits (True), and
         with route_wires routes the wires and returns them with cut lengths and errors
         (violates_bend_radius: SOLIDWORKS checks the innermost wire of the bundle, so a bend at
@@ -1895,6 +1905,43 @@ def check_path_clearance(
         "bend_radii": bend_radii, "paths": paths, "clearance": clearance, "ignore": ignore,
         "include_hidden": include_hidden, "ignore_same_parent": ignore_same_parent,
         "limit": limit, "keep_probe": keep_probe})
+
+
+@mcp.tool(structured_output=False)
+def route_covering(
+    route: str,
+    action: Literal["list", "add", "remove"] = "list",
+    segments: str = "",
+    wires: str = "",
+    min_wires: Annotated[int, Field(ge=0)] = 0,
+    name: str = "",
+    part_number: str = "",
+    outer_diameter: Annotated[float, Field(ge=0)] = 0.0,
+    color: str = "",
+) -> str:
+    """Coverings (sleeving, tape, conduit) on the route segments of an electrical route in the
+    ACTIVE assembly (IRouteProperty.CreateCovering / AddCovering, ICovering). Bumps state_version
+    for add / remove; list is read-only.
+    route: the route sub-assembly (routing_status route_assemblies).
+    action: 'list' every segment (id, length_mm, wires, has_covering, covering {name, part_number,
+        outer_diameter_mm}); 'add' (replaces an existing covering) or 'remove' on the chosen ones.
+    Choose segments by segments (JSON list of route segment ids, as routing_status reports them),
+    wires (JSON list: the segments whose wire set is exactly these wires, e.g. a twisted pair's
+    trunk) or min_wires (every segment carrying at least that many wires).
+    name / part_number: the covering's identity; outer_diameter (m, required for add): the covered
+    bundle's outside diameter; color: JSON [r, g, b].
+    A covering applies to whole route segments, as the Covering PropertyManager does. A covering on
+    part of a segment (a manufacturer's free zone at a housing) needs SOLIDWORKS' Split Route or
+    Fixed Length Covering first, which the Routing API does not offer: do that in the GUI."""
+    params = {"route": route, "action": action, "min_wires": min_wires, "name": name,
+              "part_number": part_number, "outer_diameter": outer_diameter}
+    if segments.strip():
+        params["segments"] = segments
+    if wires.strip():
+        params["wires"] = wires
+    if color.strip():
+        params["color"] = json.loads(color)
+    return _call("route_covering", params)
 
 
 @mcp.tool(structured_output=False)

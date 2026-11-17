@@ -169,6 +169,17 @@ Session 5 (2026-11-16, wire bends at route nodes):
 | `route_path(max_kink_deg, allow_sharp_junctions)` | before drawing, each polyline end on a node (route point, stub end, other polyline end) must leave within `max_kink_deg` of the straightest other segment there (fan-out siblings excluded), radius-0 corners must deflect less: else `SHARP_JUNCTION`, nothing drawn; `dry_run` returns `junctions` and `sharp_junctions` | compile + contract tests; draw not yet exercised on a live route |
 | `route_path(fan_out=[{max_leg_angle_deg}])` | without `join` / `join_distance`, the join sits on the mean exit axis at the shortest distance keeping every leg within `max_leg_angle_deg` (default `max_kink_deg`; bisection, 2-250 mm) instead of 8 mm | offline equivalent: 6-way 12.5 mm, 16 of 28 cavities 56 mm |
 
+| `route_path(fan_out)` smooth legs (default) | each leg [stub end, corner, join]: straight along the cavity axis, one fillet of `leg_radius`, arriving within `max_leg_angle_deg` of the bundle direction; `turn` gives a turn fan (legs layered by `layer_step` per upstream cavity row); `straight_legs` keeps the old legs | 2-wire pair: legs bend 14 deg at r 7, 0 sharp nodes, no route errors; dry runs on 6-way (turn), 4-way and 16-of-28 (axial) fans |
+| `route_covering` (new) | list / add / remove coverings on route segments by id, wire set or wire count | covering added on a pair's trunk segment, OD read back |
+
+Lessons: `IRouteProperty.AddCovering` stores a copy: properties set on the covering before the
+call (OuterDiameter) read back 0; set them on `GetCovering()` afterwards (as the API's Edit
+Coverings example does). `RemoveCovering()` takes no argument and returns nothing. The Routing API
+has no Add Bends, Repair Route, Split Route or Fixed Length Covering (interactive only). A large
+assembly opened in large-assembly mode keeps components lightweight even with
+`open_document(lightweight=False)`; lightweight connectors make Edit Wires report "'From' or 'To'
+component was not found" and drop the wire paths: resolve (`check_rebuild(resolve_lightweight=True)`)
+before routing.
 Lessons: SOLIDWORKS Routing's bend check covers arcs only; wires routed one by one still follow
 the segment centrelines, so every node (stub end, join, breakout, bundle-to-bundle, covering
 boundary) needs a planned shape: the leaving segment within a small angle of the arriving one,

@@ -1044,12 +1044,31 @@
     "min_corner_deg": "number (optional, degrees, default 10 - corners deflecting less are drawn sharp)",
     "wire_paths": "string (optional - JSON {wire: [segment ids] | \"<other wire>\"}: IWire.SetRoutePathForWire on exit, after RouteWires; e.g. a wire attached to the wrong connector takes the path of its twin)",
     "paths": "string (optional - JSON [{name?, points, bend_radii? | bend_radius?}]: more polylines drawn in the same route edit after points; each end snaps onto the route or an earlier polyline of the call)",
-    "fan_out": "string (optional - JSON [{connector, join?, join_distance?, max_leg_angle_deg?, pins?}]: one straight leg from each used cavity stub end of a per-cavity connector to a join node, drawn first; without join / join_distance the join sits on the mean exit axis just far enough out for every leg to stay within max_leg_angle_deg (default max_kink_deg) of its stub; result fan_out [{connector, pins, join, join_mm, longest_leg_mm, max_leg_angle_deg}])",
+    "fan_out": "string (optional - JSON [{connector, pins?, join?, turn?, leg_radius?, max_leg_angle_deg?, layer_step?, lead?, straight_legs?, join_distance?}]: smooth legs by default (straight out of each cavity, one bend of leg_radius, arriving within max_leg_angle_deg of the bundle direction turn); straight_legs keeps the old legs: one straight leg from each used cavity stub end of a per-cavity connector to a join node, drawn first; without join / join_distance the join sits on the mean exit axis just far enough out for every leg to stay within max_leg_angle_deg (default max_kink_deg) of its stub; result fan_out [{connector, pins, join, join_mm, longest_leg_mm, max_leg_angle_deg}])",
     "max_kink_deg": "number (optional, degrees, default 15 - SHARP_JUNCTION when a polyline end leaves a node (stub end, join, breakout, other bundle's end) more than this off the straightest segment already there, or a corner without a bend radius deflects more; also the limit of the per-wire bends report after routing)",
     "allow_sharp_junctions": "boolean (optional, default false - draw despite SHARP_JUNCTION; the junctions are listed in warnings)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, bends?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, junctions[{path, at_mm, kink_deg, straightest, segments_at_node}], sharp_junctions, steps, warnings?}."
+ },
+ "route_covering": {
+  "description": "Active assembly: lists, adds or removes coverings on the route segments of an electrical route (route component edited for the Routing API: IElectricalRoute.GetRouteProperty, IRouteProperty.CreateCovering / AddCovering / GetCovering / RemoveCovering / HasCovering, ICovering Name / PartNumber / OuterDiameter / Color set on the attached covering). Segments by id, exact wire set or minimum wire count. Whole segments only (Split Route / Fixed Length Covering are not in the API). add / remove increment state_version; list is read-only.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "route": "string (required - route sub-assembly instance)",
+    "action": "string (optional, default list - list | add | remove)",
+    "segments": "string (optional - JSON list of route segment ids)",
+    "wires": "string (optional - JSON list of wire names: segments whose wire set equals it)",
+    "min_wires": "integer (optional - segments carrying at least this many wires)",
+    "name": "string (optional - covering name)",
+    "part_number": "string (optional - covering part number)",
+    "outer_diameter": "number (add: required, meters - covered outside diameter)",
+    "color": "array (optional - [r, g, b])"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {route, segments[{id, length_mm, wires, added?, removed?, replaced?, has_covering, covering?{name, part_number, outer_diameter_mm}}], note, steps, warnings?}"
  },
  "route_guidelines": {
   "description": "Active assembly: edits a route and converts its guidelines into route geometry (IAutoRoute.ShowGuidelines, SelectGuidelines, ConvertGuidelinesToRoute), optionally exits. Increments state_version.",
