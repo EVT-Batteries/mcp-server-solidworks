@@ -1791,7 +1791,8 @@ def route_path(
         each end snaps onto the route or onto an end of an earlier polyline of the call.
     fan_out: JSON [{"connector": instance, "pins"?: [...], "join"?: [x,y,z], "turn"?: [dx,dy,dz],
         "leg_radius"?: m, "max_leg_angle_deg"?: deg, "layer_step"?: m, "lead"?: m,
-        "concentric"?: bool, "concentric_max_span"?: m, "straight_legs"?: bool, "join_distance"?: m}] for connectors with one connection point per
+        "concentric"?: bool, "concentric_max_span"?: m, "converge"?: bool, "throat_radius"?: m,
+        "converge_max_deg"?: deg, "straight_legs"?: bool, "join_distance"?: m}] for connectors with one connection point per
         cavity (add_connector_pins): one leg per used cavity (the stubs the from-to import put on
         the route, or the pins named) to a join node, drawn before points / paths so a branch can
         start on it. Each leg leaves its cavity straight along the cavity axis (no kink at the
@@ -1806,13 +1807,24 @@ def route_path(
         the turn, so the wires turn together as a ribbon close to the plug (legs report
         bend_starts_mm and radius_mm). Otherwise (a long row turning edgewise) or
         concentric=false: staggered, all legs at leg_radius, the cavities further upstream
-        bending deeper by layer_step (default 0.0015 = one wire layer).
+        bending deeper by layer_step (default 0.0015 = one wire layer). A turn fan makes the
+        wires further from the bundle side longer by their offset along the turn (a 40 mm row:
+        up to 40 mm+ spread); for a wide row prefer converge and turn the bundle path instead.
+        converge (axial fans, no turn, no join; default false): two bends per outer leg, toward
+        the axis (at most converge_max_deg, default 45) right after the stub, then back at a
+        throat point (the cavity offset scaled to throat_radius, default 0.9 mm * sqrt(wires),
+        min 2 mm, so the wires keep their order), arriving within max_leg_angle_deg: the bundle
+        forms inline about 2 plug widths closer than a single-bend axial fan (whose join sits
+        offset / tan(max_leg_angle) out), with leg lengths close together
+        (leg_length_spread_mm). Draw the bundle's turn as a filleted corner of the path leaving
+        the join. Legs near the axis keep one bend. An axial fan without converge reports
+        converge_hint when converge would join more than 5 mm closer.
         Without join it is placed past the corners, just far enough for the arrival angle and
         each bend. Start the bundle at the join along turn. straight_legs=true: the old straight
         legs (join_distance from the mean stub end, or from max_leg_angle_deg). Returns fan_out
         [{connector, pins, join, join_mm, shape, bundle_direction, leg_radius_mm, max_arrival_deg,
-        max_bend_deg, longest_leg_mm, legs[{straight_out_mm, bend_deg, arrival_deg,
-        fillet_fits}]}]; a dry run returns the joins and legs too.
+        max_bend_deg, longest_leg_mm, leg_length_spread_mm, legs[{bend_starts_mm, bend_deg,
+        arrival_deg, ...}]}]; a dry run returns the joins and legs too.
     exit_route=False keeps the route open for the next bundle; the last call exits (True), and
         with route_wires routes the wires and returns them with cut lengths and errors
         (violates_bend_radius: SOLIDWORKS checks the innermost wire of the bundle, so a bend at

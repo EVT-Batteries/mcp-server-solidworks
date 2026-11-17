@@ -256,3 +256,31 @@ Ideas (open):
   width (a 22-way header: 50 mm, legs over 200 mm).
 - `save_document`: `warning` when other open documents stay modified (typically the parent / top
   assembly a probe or configuration switch dirtied).
+
+## Session 7 (converging axial fans)
+
+- `route_path` fan_out `converge` (axial fans without join; default false): outer legs get two
+  bends, toward the axis (at most `converge_max_deg`, default 45) right after the stub and back
+  at a throat point (the cavity offset scaled to `throat_radius`, default 0.9 mm * sqrt(wires),
+  min 2 mm), arriving within max_leg_angle_deg; legs near the axis keep one bend. A 22-way
+  2-row header (42 mm wide) joins 39 mm behind its stubs with legs within 7.3 mm of each other;
+  the single-bend axial fan would join `offset / tan(14 deg)` = 84 mm out, and a turn fan along
+  the row made the wires differ by about the row width. Draw the bundle's turn after the join as
+  a filleted path corner.
+- Every smooth fan reports `leg_length_spread_mm`; turn fans carry a `note` on why their spread
+  is large; an axial fan without converge reports `converge_hint` when converge would join more
+  than 5 mm closer. Leg tuples now carry one radius per corner (`double[]`).
+- Edit Route could block the server: `route_path` selected the route feature and called
+  `IRouteManager.EditRoute()` without checking the selection. Right after `import_from_to` (which
+  leaves the new route in edit), the selection can fail silently; EditRoute then opens its
+  PropertyManager ("Select an existing route assembly") and waits for a pick, so the call hung
+  until someone cancelled it in the GUI. Every EditRoute call site (route_path, guideline
+  conversion, `edit_route_first`, the covering path) now checks `Select2` and refuses with
+  `SELECTION_FAILED` (or skips with a warning), and refuses `WRONG_DOCUMENT` when the route is not
+  a direct child of the active assembly (`RouteNotEditableHere`).
+- Monitoring: a long call cannot be watched with the MCP `screenshot` (single-threaded server, it
+  queues). Grab the SOLIDWORKS window from Windows (PrintWindow on the main window handle).
+  Idea: a watchdog in the execution server that reports an open PropertyManager / modal dialog
+  when a call exceeds a time limit.
+- Ideas: a `throat_shape` (round instead of the scaled flat row) for a rounder bundle start;
+  converge for turn fans (converge axially, then a bundle bend inside the fan).

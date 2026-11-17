@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -748,6 +748,23 @@ namespace SolidworksExecution.Services
             }
         }
 
+        // Edit Route only works on a route that is a direct child of the active assembly. Selecting a
+        // route nested deeper (the same harness sub-assembly placed in a parent assembly) and calling
+        // EditRoute opens the Edit Route PropertyManager, which waits for a route pick and blocks the
+        // call (and the server) until someone closes it. Returns the refusal message, or null.
+        private string RouteNotEditableHere(IModelDoc2 doc, IComponent2 routeComp)
+        {
+            IComponent2 parent = null;
+            try { parent = routeComp.GetParent() as IComponent2; } catch { }
+            if (parent == null) return null;
+            string owner = null;
+            try { owner = parent.GetPathName(); } catch { }
+            return $"{ComponentPath(routeComp)} is not a direct child of the active document {doc.GetTitle()}: " +
+                   "SOLIDWORKS can only edit a route from the assembly that holds it (from a parent assembly it opens " +
+                   "the Edit Route PropertyManager and waits for a pick). Activate or open " +
+                   (string.IsNullOrEmpty(owner) ? $"the assembly of {parent.Name2}" : owner) + " first.";
+        }
+
         // Edit the route, turn its guidelines (the connector pairs a from-to import still has to
         // wire) into route geometry, leave route editing.
         private void ConvertGuidelinesOn(IModelDoc2 doc, IAssemblyDoc asm, IRouteManager rm, IComponent2 routeComp,
@@ -755,8 +772,12 @@ namespace SolidworksExecution.Services
         {
             var rf = RouteFeatureOf(routeComp);
             if (rf == null) { warnings.Add("convert guidelines: no route feature in " + ComponentPath(routeComp)); return; }
+            var notHere = RouteNotEditableHere(doc, routeComp);
+            if (notHere != null) { warnings.Add("convert guidelines skipped: " + notHere); return; }
             doc.ClearSelection2(true);
-            steps.Add($"select {rf.Name}: " + rf.Select2(false, 0));
+            bool routeSelected = rf.Select2(false, 0);
+            steps.Add($"select {rf.Name}: " + routeSelected);
+            if (!routeSelected) { warnings.Add("convert guidelines skipped: " + "the route feature could not be selected, so Edit Route would open its PropertyManager and wait for a pick (blocking the server). Is a route still being edited elsewhere, or is the route suppressed in this configuration?"); return; }
             rm.EditRoute();
             try
             {
@@ -1072,8 +1093,15 @@ namespace SolidworksExecution.Services
                     if (rf == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "FEATURE_NOT_FOUND", $"No route feature in {ComponentPath(routeComp)}.");
+                    var notHere = RouteNotEditableHere(doc, routeComp);
+                    if (notHere != null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "WRONG_DOCUMENT", notHere);
                     doc.ClearSelection2(true);
-                    steps.Add($"select {rf.Name} ({rf.GetTypeName2()}): " + rf.Select2(false, 0));
+                    bool routeSelected = rf.Select2(false, 0);
+                    steps.Add($"select {rf.Name} ({rf.GetTypeName2()}): " + routeSelected);
+                    if (!routeSelected)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "SELECTION_FAILED",
+                            $"{ComponentPath(routeComp)}: " + "the route feature could not be selected, so Edit Route would open its PropertyManager and wait for a pick (blocking the server). Is a route still being edited elsewhere, or is the route suppressed in this configuration?");
                     rm.EditRoute();
                     steps.Add("EditRoute");
                     enteredHere = true;
@@ -1238,9 +1266,11 @@ namespace SolidworksExecution.Services
                             var legs = SmoothFanLegs(ends, dirs, turnDir, givenJoin,
                                 fo.Value<double?>("leg_radius") ?? 0.008, maxLegS,
                                 fo.Value<double?>("layer_step") ?? 0.0015, fo.Value<double?>("lead") ?? 0.0005,
-                                out join, shape, fo.Value<bool?>("concentric"), fo.Value<double?>("concentric_max_span") ?? 0.008);
+                                out join, shape, fo.Value<bool?>("concentric"), fo.Value<double?>("concentric_max_span") ?? 0.008,
+                                fo.Value<bool?>("converge"), fo.Value<double?>("throat_radius") ?? 0,
+                                fo.Value<double?>("converge_max_deg") ?? 45);
                             foreach (var lg in legs)
-                                fanJobs.Add(Tuple.Create($"fan_out {cn} pin {pins[lg.Item1]}", lg.Item2, new[] { lg.Item3 }));
+                                fanJobs.Add(Tuple.Create($"fan_out {cn} pin {pins[lg.Item1]}", lg.Item2, lg.Item3));
                             var rep = new JObject
                             {
                                 ["connector"] = ComponentPath(c),
@@ -1654,12 +1684,15 @@ namespace SolidworksExecution.Services
                 {
                     var rc = FindComponentByName(asm, routeName);
                     var rf = rc != null ? RouteFeatureOf(rc) : null;
+                    string notHere = rc != null ? RouteNotEditableHere(doc, rc) : null;
                     if (rf == null) warnings.Add("edit_route_first: route feature not found");
+                    else if (notHere != null) warnings.Add("edit_route_first skipped: " + notHere);
                     else
                     {
-                        steps.Add($"select {rf.Name}: " + rf.Select2(false, 0));
-                        rm.EditRoute();
-                        steps.Add("EditRoute");
+                        bool routeSelected = rf.Select2(false, 0);
+                        steps.Add($"select {rf.Name}: " + routeSelected);
+                        if (!routeSelected) warnings.Add("edit_route_first skipped: " + "the route feature could not be selected, so Edit Route would open its PropertyManager and wait for a pick (blocking the server). Is a route still being edited elsewhere, or is the route suppressed in this configuration?");
+                        else { rm.EditRoute(); steps.Add("EditRoute"); }
                         doc.ClearSelection2(true);
                     }
                 }
@@ -1814,8 +1847,15 @@ namespace SolidworksExecution.Services
                     if (rf == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "COMPONENT_NOT_FOUND", "No route is being edited; name the route sub-assembly in 'route'.");
+                    var notHere = RouteNotEditableHere(doc, routeComp);
+                    if (notHere != null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "WRONG_DOCUMENT", notHere);
                     doc.ClearSelection2(true);
-                    steps.Add($"select {rf.Name}: " + rf.Select2(false, 0));
+                    bool routeSelected = rf.Select2(false, 0);
+                    steps.Add($"select {rf.Name}: " + routeSelected);
+                    if (!routeSelected)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "SELECTION_FAILED",
+                            $"{ComponentPath(routeComp)}: " + "the route feature could not be selected, so Edit Route would open its PropertyManager and wait for a pick (blocking the server). Is a route still being edited elsewhere, or is the route suppressed in this configuration?");
                     rm.EditRoute();
                     steps.Add("EditRoute");
                 }

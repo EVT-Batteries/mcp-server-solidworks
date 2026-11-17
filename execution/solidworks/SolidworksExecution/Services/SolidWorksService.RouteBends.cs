@@ -278,9 +278,10 @@ namespace SolidworksExecution.Services
         // deeper by layerStep, so a leg passing over a downstream cavity runs beyond its corner
         // instead of through its wire (layered wires, as a real bundle forms).
         // Returns the legs [stub end, corner, join] with their radius, and fills join / report.
-        private static List<Tuple<int, List<double[]>, double>> SmoothFanLegs(
+        private static List<Tuple<int, List<double[]>, double[]>> SmoothFanLegs(
             List<double[]> ends, List<double[]> dirs, double[] b, double[] givenJoin, double r, double maxLegDeg,
-            double layerStep, double lead, out double[] join, JObject report, bool? concentricOpt = null, double autoSpan = 0.008)
+            double layerStep, double lead, out double[] join, JObject report, bool? concentricOpt = null, double autoSpan = 0.008,
+            bool? convergeOpt = null, double throatRadius = 0, double convergeMaxDeg = 45)
         {
             int n = ends.Count;
             var rk = Enumerable.Repeat(r, n).ToArray();
@@ -288,6 +289,9 @@ namespace SolidworksExecution.Services
             double[] dm = Unit(new[] { dirs.Average(q => q[0]), dirs.Average(q => q[1]), dirs.Average(q => q[2]) });
             b = Unit(b ?? dm);
             bool turn = Dot(b, dm) < Math.Cos(30 * Math.PI / 180);
+            if (throatRadius <= 0) throatRadius = Math.Max(0.002, 0.0009 * Math.Sqrt(n));
+            if (!turn && givenJoin == null && (convergeOpt ?? false))
+                return ConvergeFanLegs(ends, dirs, b, r, maxLegDeg, lead, throatRadius, convergeMaxDeg, out join, report);
             double tanMax = Math.Tan(maxLegDeg * Math.PI / 180);
             double Ang(double[] u, double[] v) => Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(Unit(u), Unit(v))))) * 180 / Math.PI;
 
@@ -378,9 +382,9 @@ namespace SolidworksExecution.Services
                 if (!changed) break;
             }
 
-            var legs = new List<Tuple<int, List<double[]>, double>>();
+            var legs = new List<Tuple<int, List<double[]>, double[]>>();
             var lj = new JArray();
-            double steepest = 0, worstBend = 0, longest = 0;
+            double steepest = 0, worstBend = 0, longest = 0, shortest = double.MaxValue;
             for (int k = 0; k < n; k++)
             {
                 var c = Add(ends[k], Scale(dirs[k], s[k]));
@@ -390,7 +394,8 @@ namespace SolidworksExecution.Services
                 double t = rk[k] * Math.Tan(bend / 2 * Math.PI / 180);
                 double len = s[k] + Math.Sqrt(Dot(toJ, toJ));
                 steepest = Math.Max(steepest, arrive); worstBend = Math.Max(worstBend, bend); longest = Math.Max(longest, len);
-                legs.Add(Tuple.Create(k, new List<double[]> { ends[k], c, join }, rk[k]));
+                shortest = Math.Min(shortest, len);
+                legs.Add(Tuple.Create(k, new List<double[]> { ends[k], c, join }, new[] { rk[k] }));
                 lj.Add(new JObject
                 {
                     ["k"] = k,
@@ -413,6 +418,128 @@ namespace SolidworksExecution.Services
             report["max_arrival_deg"] = Math.Round(steepest, 1);
             report["max_bend_deg"] = Math.Round(worstBend, 1);
             report["longest_leg_mm"] = Math.Round(longest * 1000, 2);
+            report["leg_length_spread_mm"] = Math.Round((longest - shortest) * 1000, 2);
+            report["legs"] = lj;
+            if (turn)
+                report["note"] = "turn fan: wires further from the bundle side run longer by their offset along the turn; " +
+                    "for a wide row an axial fan with converge=true (bundle formed inline, then the bundle path turns) keeps the lengths close";
+            else if (givenJoin == null && convergeOpt == null)
+            {
+                // Would two-bend legs into a tight throat form the bundle closer to the plug?
+                var probe = new JObject();
+                ConvergeFanLegs(ends, dirs, b, r, maxLegDeg, lead, throatRadius, convergeMaxDeg, out double[] cj, probe);
+                double[] mc = { ends.Average(q => q[0]), ends.Average(q => q[1]), ends.Average(q => q[2]) };
+                double dNow = Dot(Sub(join, mc), b), dConv = Dot(Sub(cj, mc), b);
+                if (dConv < dNow - 0.005)
+                    report["converge_hint"] = $"converge=true would join {Math.Round(dConv * 1000, 1)} mm out instead of {Math.Round(dNow * 1000, 1)} mm";
+            }
+            return legs;
+        }
+
+        // Converging axial fan: each wire leaves its cavity straight, bends (up to convergeMaxDeg) toward
+        // the fan axis, bends back at a throat point (its cavity offset scaled down to throatRadius, so
+        // the wires keep their order and form a round bundle) and runs nearly parallel to the join,
+        // arriving within maxLegDeg. The bundle forms within a few centimetres of a wide plug instead
+        // of offset / tan(maxLegDeg) out; legs close to the axis keep a single gentle bend.
+        // Legs [stub end, c1, throat, join] with two radii (or [stub end, c, join]).
+        private static List<Tuple<int, List<double[]>, double[]>> ConvergeFanLegs(
+            List<double[]> ends, List<double[]> dirs, double[] b, double r, double maxLegDeg, double lead,
+            double rho, double convMaxDeg, out double[] join, JObject report)
+        {
+            int n = ends.Count;
+            double Ang(double[] u, double[] v) => Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(Unit(u), Unit(v))))) * 180 / Math.PI;
+            double Rad(double deg) => deg * Math.PI / 180;
+            double[] m = { ends.Average(q => q[0]), ends.Average(q => q[1]), ends.Average(q => q[2]) };
+            var off = new double[n][]; var ax = new double[n];
+            for (int k = 0; k < n; k++)
+            {
+                var d = Sub(ends[k], m); ax[k] = Dot(d, b);
+                off[k] = Sub(d, Scale(b, ax[k]));
+            }
+            double omax = off.Max(o => Math.Sqrt(Dot(o, o)));
+            double kappa = omax > rho ? rho / omax : 1.0;
+            double front = ax.Max();
+            double tanLeg = Math.Tan(Rad(maxLegDeg * 0.98));
+            double lastRun = Math.Max(rho, kappa * omax) / tanLeg + lead;   // throat -> join
+            // Throat distance a (from the front stub end, along b): the steepest diagonal within
+            // convMaxDeg, each fillet with room, then the join lastRun further.
+            bool[] two = new bool[n];
+            double[][] c1 = new double[n][], th = new double[n][];
+            double a = 0.0; double[] jn = null;
+            for (int guard = 0; guard < 800; guard++, a += 0.0005)
+            {
+                jn = Add(m, Scale(b, front + a + lastRun));
+                bool ok = true;
+                for (int k = 0; k < n && ok; k++)
+                {
+                    var o = off[k]; double ol = Math.Sqrt(Dot(o, o));
+                    // Single bend when the leg straight to the join already arrives within maxLegDeg.
+                    double s1 = lead + r * Math.Tan(Rad(Math.Max(0, Ang(dirs[k], Sub(jn, ends[k]))) / 2));
+                    var cs = Add(ends[k], Scale(dirs[k], s1));
+                    if (Ang(Sub(jn, cs), b) <= maxLegDeg * 0.98 && ol <= rho * 1.5)
+                    {
+                        two[k] = false; c1[k] = cs; th[k] = null;
+                        double phi = Ang(dirs[k], Sub(jn, cs));
+                        ok = Math.Sqrt(Dot(Sub(jn, cs), Sub(jn, cs))) >= r * Math.Tan(Rad(phi / 2)) + lead;
+                        continue;
+                    }
+                    two[k] = true;
+                    var tp = Add(Add(m, Scale(b, front + a)), Scale(o, kappa));
+                    // corner 1 just past the stub end, iterated for its own fillet
+                    double s = lead;
+                    for (int it = 0; it < 8; it++)
+                    {
+                        var cc = Add(ends[k], Scale(dirs[k], s));
+                        s = lead + r * Math.Tan(Rad(Ang(dirs[k], Sub(tp, cc)) / 2));
+                    }
+                    var cA = Add(ends[k], Scale(dirs[k], s));
+                    var diag = Sub(tp, cA);
+                    double b1 = Ang(dirs[k], diag), b2 = Ang(diag, Sub(jn, tp));
+                    double t1 = r * Math.Tan(Rad(b1 / 2)), t2 = r * Math.Tan(Rad(b2 / 2));
+                    ok = Dot(diag, b) > 0 && Ang(diag, b) <= convMaxDeg + 1e-6
+                        && Math.Sqrt(Dot(diag, diag)) >= t1 + t2 + lead
+                        && Math.Sqrt(Dot(Sub(jn, tp), Sub(jn, tp))) >= t2 + lead;
+                    c1[k] = cA; th[k] = tp;
+                }
+                if (ok) break;
+            }
+            join = jn;
+            var legs = new List<Tuple<int, List<double[]>, double[]>>();
+            var lj = new JArray();
+            double steepest = 0, worstBend = 0, longest = 0, shortest = double.MaxValue;
+            for (int k = 0; k < n; k++)
+            {
+                List<double[]> p; double[] rr;
+                if (two[k]) { p = new List<double[]> { ends[k], c1[k], th[k], join }; rr = new[] { r, r }; }
+                else { p = new List<double[]> { ends[k], c1[k], join }; rr = new[] { r }; }
+                double len = 0; for (int i = 1; i < p.Count; i++) len += Math.Sqrt(Dot(Sub(p[i], p[i - 1]), Sub(p[i], p[i - 1])));
+                double arrive = Ang(Sub(join, p[p.Count - 2]), b);
+                double bend = Ang(dirs[k], Sub(p[2], p[1]));
+                double t1 = r * Math.Tan(Rad(bend / 2));
+                steepest = Math.Max(steepest, arrive); worstBend = Math.Max(worstBend, bend);
+                longest = Math.Max(longest, len); shortest = Math.Min(shortest, len);
+                legs.Add(Tuple.Create(k, p, rr));
+                lj.Add(new JObject
+                {
+                    ["k"] = k,
+                    ["bends"] = two[k] ? 2 : 1,
+                    ["bend_starts_mm"] = Math.Round((Dot(Sub(c1[k], ends[k]), dirs[k]) - t1) * 1000, 2),
+                    ["radius_mm"] = Math.Round(r * 1000, 2),
+                    ["bend_deg"] = Math.Round(bend, 1),
+                    ["arrival_deg"] = Math.Round(arrive, 1),
+                    ["length_mm"] = Math.Round(len * 1000, 2),
+                });
+            }
+            report["shape"] = "axial";
+            report["converge"] = true;
+            report["throat_radius_mm"] = Math.Round(rho * 1000, 2);
+            report["join_distance_mm"] = Math.Round(Dot(Sub(join, m), b) * 1000, 2);
+            report["bundle_direction"] = J3(b, 6);
+            report["leg_radius_mm"] = Math.Round(r * 1000, 2);
+            report["max_arrival_deg"] = Math.Round(steepest, 1);
+            report["max_bend_deg"] = Math.Round(worstBend, 1);
+            report["longest_leg_mm"] = Math.Round(longest * 1000, 2);
+            report["leg_length_spread_mm"] = Math.Round((longest - shortest) * 1000, 2);
             report["legs"] = lj;
             return legs;
         }
