@@ -230,7 +230,14 @@ Results are in `$r.cadState.features` (often one JSON string).
     `InsertRoutePoint` with only a sketch point selected creates nothing (opens its dialog).
   - `IWire.GetRouteErrors` reports `violates_bend_radius` against the wire library's
     `MinBendRadius`, for the innermost wire of the bundle: an arc of exactly the minimum radius
-    is flagged (2026-11-12). Sharp corners where bundles meet at a breakout or a stub end are not.
+    is flagged (2026-11-12). Sharp corners where bundles meet at a breakout or a stub end are not:
+    a node of the route sketch is not an arc, so a wire turning there at any angle (90 deg and
+    more seen) routes with no error. `Services/SolidWorksService.RouteBends.cs` computes each
+    wire's kink at every node of its path from `IWire.GetRouteSegmentIDs` and
+    `IElectricalRoute.GetSketchSegments(id)` (chain each segment's lines / arcs by end points;
+    two segments of the wire sharing a terminal point = a node; the segment ids are not
+    ordered along the wire, so match by points), and `route_path` checks the same before
+    drawing (`SHARP_JUNCTION`).
   - First real harnesses (2026-11-12): `ImportFromToList` also returns false when row 1 of the
     list holds text or a Pin cell is empty (an empty Partno is fine, but that connector gets no
     stub: `AddToRoute` its CPoint). `SetFromToListHeaderDefinitions` never keeps "other" and the

@@ -235,7 +235,7 @@ namespace SolidworksExecution.Services
                     if (comp == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "COMPONENT_NOT_FOUND", ComponentNotFoundMessage(asm, routeName));
-                    var rj = ReadElectricalRoute(doc, asm, comp);
+                    var rj = ReadElectricalRoute(doc, asm, comp, p?.Value<double?>("max_kink_deg") ?? 15.0);
                     var terms = ParseTerminations(p?["terminations"]);
                     if (terms != null) ApplyTerminations(rj, terms);
                     result["route"] = rj;
@@ -255,7 +255,7 @@ namespace SolidworksExecution.Services
         // Wires, cables and route segments of a route sub-assembly. The Routing API gives route
         // properties only while the route component is being edited: edit it, read, and return the
         // edit focus to the top assembly.
-        private JObject ReadElectricalRoute(IModelDoc2 top, IAssemblyDoc topAsm, IComponent2 routeComp)
+        private JObject ReadElectricalRoute(IModelDoc2 top, IAssemblyDoc topAsm, IComponent2 routeComp, double maxKinkDeg = 15.0)
         {
             var o = new JObject { ["component"] = ComponentPath(routeComp) };
             var routeAsm = routeComp.GetModelDoc2() as IAssemblyDoc;
@@ -272,11 +272,13 @@ namespace SolidworksExecution.Services
                 if (er == null) { o["error"] = "no electrical route in this route assembly"; return o; }
 
                 var wires = new JArray();
+                var wireObjs = new List<IWire>();
                 if (er.GetWires() is object[] ws)
                     foreach (var w in ws)
                     {
                         var wire = w as IWire;
                         if (wire == null) continue;
+                        wireObjs.Add(wire);
                         var wj = new JObject
                         {
                             ["name"] = SafeStr(() => wire.UserName),
@@ -314,6 +316,32 @@ namespace SolidworksExecution.Services
                     }
                 o["wires"] = wires;
                 try { o["cables_count"] = er.GetCablesCount(); } catch { }
+
+                // Kinks SOLIDWORKS does not check (nodes where a wire turns with no arc).
+                try
+                {
+                    double[] R = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, T = { 0, 0, 0 };
+                    try
+                    {
+                        if (routeComp.Transform2?.ArrayData is double[] a && a.Length >= 12)
+                        { R = a.Take(9).ToArray(); T = new[] { a[9], a[10], a[11] }; }
+                    }
+                    catch { }
+                    double[] Map(double[] v) => new[]
+                    {
+                        v[0] * R[0] + v[1] * R[3] + v[2] * R[6] + T[0],
+                        v[0] * R[1] + v[1] * R[4] + v[2] * R[7] + T[1],
+                        v[0] * R[2] + v[1] * R[5] + v[2] * R[8] + T[2],
+                    };
+                    var bends = WireBends(er, wireObjs, maxKinkDeg, Map);
+                    var perWire = bends["per_wire"] as JObject;
+                    bends.Remove("per_wire");
+                    foreach (var wj in wires.OfType<JObject>())
+                        if (perWire?[(string)wj["name"] ?? ""] is JObject bw)
+                            foreach (var kv in bw) wj[kv.Key] = kv.Value;
+                    o["bends"] = bends;
+                }
+                catch (Exception ex) { o["bends_error"] = ex.Message; }
 
                 var segs = new JArray();
                 try
@@ -995,6 +1023,11 @@ namespace SolidworksExecution.Services
                 bool allowFree = p?.Value<bool?>("allow_free_ends") ?? false;
                 double freeTol = p?.Value<double?>("free_end_tolerance") ?? 0.0005;
                 double minCornerDeg = p?.Value<double?>("min_corner_deg") ?? 10.0;
+                // A wire turning at a node (stub end, fan-out join, breakout, bundle-to-bundle) has no
+                // arc there and SOLIDWORKS does not flag it: refuse polylines leaving a node more
+                // than max_kink_deg off its straightest neighbour, and sharp corners over it.
+                double maxKinkDeg = p?.Value<double?>("max_kink_deg") ?? 15.0;
+                bool allowSharp = p?.Value<bool?>("allow_sharp_junctions") ?? false;
                 bool enteredHere = false;
                 bool Given(string k) { string v = p?.Value<string>(k); return !string.IsNullOrWhiteSpace(v) && v.Trim() != "[]"; }
                 if (dryRun && !Given("points") && !Given("paths") && !Given("fan_out"))
@@ -1197,7 +1230,18 @@ namespace SolidworksExecution.Services
                         if (fo["join"] is JArray jj && jj.Count == 3) join = new[] { (double)jj[0], (double)jj[1], (double)jj[2] };
                         else
                         {
-                            double jd = fo.Value<double?>("join_distance") ?? 0.008;
+                            // join_distance given: that; else the shortest distance that keeps every
+                            // leg within max_leg_angle_deg (default max_kink_deg) of its stub.
+                            double? jdGiven = fo.Value<double?>("join_distance");
+                            double jd;
+                            if (jdGiven.HasValue) jd = jdGiven.Value;
+                            else
+                            {
+                                double maxLeg = fo.Value<double?>("max_leg_angle_deg") ?? maxKinkDeg;
+                                jd = FanJoinDistance(ends, dirs, maxLeg, out double got);
+                                steps.Add($"fan_out {cn}: join {Math.Round(jd * 1000, 2)} mm out (legs within {Math.Round(got, 1)} deg)");
+                                if (got > maxLeg + 0.05) warnings.Add($"fan_out {cn}: legs still {Math.Round(got, 1)} deg at {Math.Round(jd * 1000)} mm: give join or check the stub directions");
+                            }
                             double[] m = { ends.Average(q => q[0]), ends.Average(q => q[1]), ends.Average(q => q[2]) };
                             double[] dm = Unit(new[] { dirs.Average(q => q[0]), dirs.Average(q => q[1]), dirs.Average(q => q[2]) });
                             join = Add(m, Scale(dm, jd));
@@ -1290,6 +1334,21 @@ namespace SolidworksExecution.Services
                             }
                         }
                     }
+                    var kinkViolations = new List<string>();
+                    var junctions = JunctionKinks(sk, jobs, maxKinkDeg, kinkViolations);
+                    if (kinkViolations.Count > 0 && !allowSharp && !dryRun)
+                    {
+                        if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); } catch { } }
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "SHARP_JUNCTION",
+                            $"Nothing drawn: {kinkViolations.Count} sharp wire bend(s) over max_kink_deg {maxKinkDeg}: " + string.Join("; ", kinkViolations.Take(12))
+                            + (kinkViolations.Count > 12 ? $"; ... ({kinkViolations.Count - 12} more)" : "")
+                            + ". A node (stub end, fan-out join, breakout, end of the previous bundle) is drawn without a fillet and SOLIDWORKS "
+                            + "does not check it: the wires would kink with radius 0. Leave each node within max_kink_deg of the segment the "
+                            + "wires come from (first leg along the stub / trunk, a Y-shaped breakout), then turn with a filleted corner at "
+                            + "least r*tan(deflection/2) further on; move a fan-out join further out (fan_out max_leg_angle_deg). "
+                            + "route_path(dry_run=True) lists every junction. allow_sharp_junctions=true draws anyway.");
+                    }
+                    foreach (var kv in kinkViolations) warnings.Add("sharp junction: " + kv);
                     if (looseEnds.Count > 0 && !allowFree)
                     {
                         if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); } catch { } }
@@ -1319,6 +1378,8 @@ namespace SolidworksExecution.Services
                             dr["length_mm"] = Math.Round(jobs.Sum(jb => DrawFilletedPolyline(null, jb.Item2, jb.Item3, new JArray())) * 1000, 3);
                         }
                         if (fanReport.Count > 0) dr["fan_out"] = fanReport;
+                        dr["junctions"] = junctions;
+                        dr["sharp_junctions"] = kinkViolations.Count;
                         dr["steps"] = steps;
                         if (warnings.Count > 0) dr["warnings"] = warnings;
                         return ReadOnlyResponse(request, doc, dr);
@@ -1377,9 +1438,10 @@ namespace SolidworksExecution.Services
                     if (doRoute || wirePaths != null)
                     {
                         RouteWiresOn(doc, asm, routeComp, steps, warnings, wirePaths, doRoute);
-                        var er = ReadElectricalRoute(doc, asm, routeComp);
+                        var er = ReadElectricalRoute(doc, asm, routeComp, maxKinkDeg);
                         if (er["wires"] is JArray w && w.Count > 0) result["wires"] = w;
                         if (er["segments"] != null) result["segments"] = er["segments"];
+                        if (er["bends"] != null) result["bends"] = er["bends"];
                     }
                 }
                 result["steps"] = steps;

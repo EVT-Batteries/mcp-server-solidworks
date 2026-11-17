@@ -1529,7 +1529,8 @@ def sweep_circular(
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
-                   terminations: str = "") -> str:
+                   terminations: str = "",
+                   max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0) -> str:
     """Read SOLIDWORKS Routing state (read-only, does NOT change state_version).
     Always: whether the Routing add-in is loaded and its cable / component library files;
     verbose=True: every library file location and the from-to header definitions (an EMPTY one
@@ -1541,6 +1542,13 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
     segments they run through, errors such as not_routed / violates_bend_radius, wire part
     number, colour, diameter_mm) and segments (id, length_mm, bend_radius_mm,
     bundle_diameter_mm).
+    Bends SOLIDWORKS does not check: its violates_bend_radius compares only the ARCS of the route
+    with the wire's minimum bend radius. Where route segments meet (stub end, fan-out join,
+    breakout, one bundle continuing into the next, a covering boundary) there is no arc: a wire
+    turning there kinks with radius 0 and nothing flags it. Each wire therefore also gets
+    max_kink_deg (its sharpest turn at a node of its own path), min_arc_radius_mm and
+    sharp_bends [{at_mm, kink_deg, where}] (turns over max_kink_deg, default 15); route.bends
+    lists those nodes with their wires (at_mm in the active assembly's coordinates).
     connectors: JSON list of component names / instance paths, or a name fragment (matched
         against the instance names of loaded parts): each one's reference designator and its
         connection points (name, pin, location_mm, direction, stub_mm, stub_end_mm) in the
@@ -1552,6 +1560,8 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         total_cut_length_mm = cut_length_mm + both allowances: the length to cut, strip
         included. Wires with an end lacking an entry: terminations_missing."""
     params = {"route": route, "verbose": verbose}
+    if max_kink_deg != 15.0:
+        params["max_kink_deg"] = max_kink_deg
     if connectors.strip():
         params["connectors"] = connectors
     if terminations.strip():
@@ -1758,6 +1768,8 @@ def route_path(
     wire_paths: str = "",
     paths: str = "[]",
     fan_out: str = "[]",
+    max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0,
+    allow_sharp_junctions: bool = False,
 ) -> str:
     """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one bundle per
     call with points, or many with paths / fan_out). Bumps state_version. To redraw a bundle, delete the route
@@ -1774,18 +1786,20 @@ def route_path(
     paths: JSON [{"name"?, "points": [[x,y,z], ...], "bend_radii"?: [...] | "bend_radius"?: r}, ...]
         more polylines drawn in the same route edit after points (a whole route in one call);
         each end snaps onto the route or onto an end of an earlier polyline of the call.
-    fan_out: JSON [{"connector": instance, "join"?: [x,y,z], "join_distance"?: m, "pins"?: [...]}]
-        for connectors with one connection point per cavity (add_connector_pins): one straight
-        leg from each used cavity's stub end (the stubs the from-to import put on the route, or
-        the pins named) to a join node, drawn before points / paths so a branch can start on
-        it. join defaults to the mean stub end + join_distance (default 0.008) along the mean
-        exit direction. Returns fan_out [{connector, pins, join (m), join_mm, longest_leg_mm,
-        max_leg_angle_deg}]; a dry run returns the joins too.
+    fan_out: JSON [{"connector": instance, "join"?: [x,y,z], "join_distance"?: m,
+        "max_leg_angle_deg"?: deg, "pins"?: [...]}] for connectors with one connection point per
+        cavity (add_connector_pins): one straight leg from each used cavity's stub end (the stubs
+        the from-to import put on the route, or the pins named) to a join node, drawn before
+        points / paths so a branch can start on it. Without join / join_distance the join sits
+        on the mean exit axis just far enough out that every leg stays within max_leg_angle_deg
+        (default max_kink_deg) of its stub (a wide plug needs a longer fan). Start the bundle
+        from the join along that axis. Returns fan_out [{connector, pins, join (m), join_mm,
+        longest_leg_mm, max_leg_angle_deg}]; a dry run returns the joins too.
     exit_route=False keeps the route open for the next bundle; the last call exits (True), and
         with route_wires routes the wires and returns them with cut lengths and errors
         (violates_bend_radius: SOLIDWORKS checks the innermost wire of the bundle, so a bend at
-        exactly the library minimum is flagged; use minimum + bundle radius or more. Sharp
-        corners at a breakout or at a stub end are not flagged).
+        exactly the library minimum is flagged; use minimum + bundle radius or more) and bends:
+        the nodes where wires kink over max_kink_deg, which SOLIDWORKS never flags (see below).
     snap_tolerance (m): the first / last point is moved onto the nearest existing route point
         within this distance (the solver shifts earlier geometry by a few um when stubs or
         bundles are added, which would leave a gap at a breakout). 0 = off.
@@ -1800,6 +1814,16 @@ def route_path(
       fine. allow_free_ends=True draws anyway.
     - Corners deflecting less than min_corner_deg are drawn sharp (warning): a filleted 4 deg
       corner split a route into disconnected segments.
+    - SHARP_JUNCTION: only the corners INSIDE a polyline get arcs. Where a polyline end meets a
+      node (a stub end, a fan-out join, a breakout, the end of another bundle) it is drawn
+      sharp, and SOLIDWORKS checks arcs only: a branch leaving a trunk at 90 deg routes with no
+      error and every wire in it kinks 90 deg with radius 0. Each polyline end on a node must
+      leave within max_kink_deg (default 15) of the straightest segment already there (for a
+      stub: its exit direction; at a breakout: the trunk the wires come from), and a corner
+      with radius 0 must deflect less than that. Shape: first leg along the stub / trunk (a
+      Y-shaped breakout, branches splitting by <= max_kink_deg each), then a filleted corner at
+      least r*tan(deflection/2) further on. allow_sharp_junctions=True draws anyway (warnings).
+      A dry run lists every junction (path end, kink_deg, the straightest neighbour).
     dry_run=True: snap and check, then return the points as they would be drawn and their
     geometry (length_mm, per corner deflection / radius / tangent, per leg length and straight
     rest, min_straight_mm < 0 = radii too big) without drawing. It reads the route sketch without
@@ -1820,6 +1844,10 @@ def route_path(
         "snap_tolerance": snap_tolerance, "merge_tolerance": merge_tolerance,
         "dry_run": dry_run, "allow_free_ends": allow_free_ends,
         "free_end_tolerance": free_end_tolerance, "min_corner_deg": min_corner_deg}
+    if max_kink_deg != 15.0:
+        params["max_kink_deg"] = max_kink_deg
+    if allow_sharp_junctions:
+        params["allow_sharp_junctions"] = True
     if wire_paths and wire_paths.strip() not in ("", "{}"):
         params["wire_paths"] = wire_paths
     if paths and paths.strip() not in ("", "[]"):

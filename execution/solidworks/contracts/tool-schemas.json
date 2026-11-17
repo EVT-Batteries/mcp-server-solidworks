@@ -937,10 +937,11 @@
     "route": "string (optional - a route sub-assembly instance to read wires and segments from)",
     "verbose": "boolean (optional, default false - every routing library location and the from-to header definitions)",
     "connectors": "string (optional - JSON list of component names / instance paths, or a name fragment: their reference designator and connection points (pin, location, direction, stub end) in the active assembly's coordinates)",
-    "terminations": "string (optional - JSON {\"<REF>.<pin>\" | \"<REF>\" | \"*\": allowance_mm | {allowance_mm, strip_mm, ...}}: per-end wire length beyond the route end; adds termination and total_cut_length_mm to each wire)"
+    "terminations": "string (optional - JSON {\"<REF>.<pin>\" | \"<REF>\" | \"*\": allowance_mm | {allowance_mm, strip_mm, ...}}: per-end wire length beyond the route end; adds termination and total_cut_length_mm to each wire)",
+    "max_kink_deg": "number (optional, degrees, default 15 - a wire turning more than this at a node of its path (where its route segments meet, or a corner without an arc inside one) is listed in sharp_bends: SOLIDWORKS checks arcs only)"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, connectors?:[{component, reference?, connection_points[{name, pin, location_mm, direction, stub_mm, stub_end_mm}]}], route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm, termination?{from, to}, total_cut_length_mm?}], terminations?, terminations_missing?, cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
+  "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, connectors?:[{component, reference?, connection_points[{name, pin, location_mm, direction, stub_mm, stub_end_mm}]}], route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm, max_kink_deg, min_arc_radius_mm?, sharp_bends?[{at_mm, kink_deg, where}], termination?{from, to}, total_cut_length_mm?}], bends:{max_kink_deg_allowed, sharp_bend_nodes, sharp_bends[{at_mm, kink_deg, where, wires}], note}, terminations?, terminations_missing?, cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
  },
  "add_routing_point": {
   "description": "Active part: a 3D sketch point, then a connection point (FeatureManager.InsertConnectionPoint, electrical, face mark 1 + point mark 1) or a route point (InsertRoutePoint), and/or the Routing component type (IRoutingComponentManager.SetComponentType + SetComponentRouteTypeToCustomProperty(electrical)). Increments state_version.",
@@ -1023,7 +1024,7 @@
   "output": "-> see execution-response.json - Features[0] = JSON {imported, new_route?, route?:{component, wires, cables_count, segments}, route_assemblies, steps, warnings?} With replaces: deleted_files. With configurations: suppressed_in, active_configuration."
  },
  "route_path": {
-  "description": "Active assembly: edits a route (Route feature + IRouteManager.EditRoute, unless one is being edited), adds connection points (AddToRoute), snaps the first / last point onto the nearest existing route sketch point within snap_tolerance, draws a filleted 3D polyline in the route sketch (AddToDB), merges points within merge_tolerance (MergePoints, also without points), optionally ExitRoute + EditAssembly + RouteWires. Increments state_version.",
+  "description": "Active assembly: edits a route (Route feature + IRouteManager.EditRoute, unless one is being edited), adds connection points (AddToRoute), snaps the first / last point onto the nearest existing route sketch point within snap_tolerance, checks the kink of every polyline end at its node (SOLIDWORKS flags arcs under the wire's MinBendRadius only, never a node), draws a filleted 3D polyline in the route sketch (AddToDB), merges points within merge_tolerance (MergePoints, also without points), optionally ExitRoute + EditAssembly + RouteWires. Increments state_version.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -1043,10 +1044,12 @@
     "min_corner_deg": "number (optional, degrees, default 10 - corners deflecting less are drawn sharp)",
     "wire_paths": "string (optional - JSON {wire: [segment ids] | \"<other wire>\"}: IWire.SetRoutePathForWire on exit, after RouteWires; e.g. a wire attached to the wrong connector takes the path of its twin)",
     "paths": "string (optional - JSON [{name?, points, bend_radii? | bend_radius?}]: more polylines drawn in the same route edit after points; each end snaps onto the route or an earlier polyline of the call)",
-    "fan_out": "string (optional - JSON [{connector, join?, join_distance?, pins?}]: one straight leg from each used cavity stub end of a per-cavity connector to a join node, drawn first; result fan_out [{connector, pins, join, join_mm, longest_leg_mm, max_leg_angle_deg}])"
+    "fan_out": "string (optional - JSON [{connector, join?, join_distance?, max_leg_angle_deg?, pins?}]: one straight leg from each used cavity stub end of a per-cavity connector to a join node, drawn first; without join / join_distance the join sits on the mean exit axis just far enough out for every leg to stay within max_leg_angle_deg (default max_kink_deg) of its stub; result fan_out [{connector, pins, join, join_mm, longest_leg_mm, max_leg_angle_deg}])",
+    "max_kink_deg": "number (optional, degrees, default 15 - SHARP_JUNCTION when a polyline end leaves a node (stub end, join, breakout, other bundle's end) more than this off the straightest segment already there, or a corner without a bend radius deflects more; also the limit of the per-wire bends report after routing)",
+    "allow_sharp_junctions": "boolean (optional, default false - draw despite SHARP_JUNCTION; the junctions are listed in warnings)"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, steps, warnings?}."
+  "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, bends?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, junctions[{path, at_mm, kink_deg, straightest, segments_at_node}], sharp_junctions, steps, warnings?}."
  },
  "route_guidelines": {
   "description": "Active assembly: edits a route and converts its guidelines into route geometry (IAutoRoute.ShowGuidelines, SelectGuidelines, ConvertGuidelinesToRoute), optionally exits. Increments state_version.",

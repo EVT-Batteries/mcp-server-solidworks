@@ -161,7 +161,37 @@ Seating a plug: compare the plug's shoulder distance (mating face to flange) wit
 pocket depth and align the header pins with the plug's pin entries; a solid supplier mating face
 stops the plug at the pin tips, several mm short.
 
+Session 5 (2026-11-16, wire bends at route nodes):
+
+| Tool | Change | Tested |
+|---|---|---|
+| `routing_status(route=...)`, `route_path` (after routing) | per wire `max_kink_deg`, `min_arc_radius_mm`, `sharp_bends` [{at_mm, kink_deg, where}] (turns over `max_kink_deg`, default 15, at nodes of its own path: junctions of two of its segments, radius-0 corners inside one); `bends` lists the nodes with their wires | 12 existing routes (2-50 wires): 0-99 sharp nodes each, up to 147 deg, none flagged by SOLIDWORKS |
+| `route_path(max_kink_deg, allow_sharp_junctions)` | before drawing, each polyline end on a node (route point, stub end, other polyline end) must leave within `max_kink_deg` of the straightest other segment there (fan-out siblings excluded), radius-0 corners must deflect less: else `SHARP_JUNCTION`, nothing drawn; `dry_run` returns `junctions` and `sharp_junctions` | compile + contract tests; draw not yet exercised on a live route |
+| `route_path(fan_out=[{max_leg_angle_deg}])` | without `join` / `join_distance`, the join sits on the mean exit axis at the shortest distance keeping every leg within `max_leg_angle_deg` (default `max_kink_deg`; bisection, 2-250 mm) instead of 8 mm | offline equivalent: 6-way 12.5 mm, 16 of 28 cavities 56 mm |
+
+Lessons: SOLIDWORKS Routing's bend check covers arcs only; wires routed one by one still follow
+the segment centrelines, so every node (stub end, join, breakout, bundle-to-bundle, covering
+boundary) needs a planned shape: the leaving segment within a small angle of the arriving one,
+then a filleted corner.
+
 Ideas (open):
+
+- **Turn-fans:** `fan_out` legs are straight. A plug whose wires exit toward a nearby wall needs
+  each leg to leave its cavity straight, bend with the wire's radius and converge on the bundle
+  line (`{"turn": [dx,dy,dz], "leg_radius": r}`: legs [stub end, corner, join]). Watch for
+  collinear legs (cavities in one row turning along that row overlap).
+- **Implicit-fillet criterion:** besides the angle limit, accept a node kink theta when the
+  wire's minimum bend radius r fits as a fillet in both adjacent straights (r tan(theta/2) each);
+  the length error 2 r tan(theta/2) - r theta stays under 0.3 mm up to 45 deg at r 7. That would
+  let fan-outs converge faster where room is short.
+- **check_interference with clearance:** a call on 6 components with clearance 0.001 took
+  seconds once, then ran over 30 min on the same components after they moved a few mm (aborted
+  by stopping the execution server). Suspect the per-neighbour Measure on a surface-only or
+  large neighbour: add a time budget like component_status.
+- **Smoothing in the tool:** `route_path` could insert the lead-in points itself (rotate a
+  sharp end toward the segment its wires continue into, fillet the new corner), as the
+  workspace planning script does today; it needs the wire set per polyline to pick the right
+  partner at a breakout.
 
 - **Fan-out end assignment for bundle lengths:** `routing_status` could return, per wire, the
   length of its connector ends (stub + fan-out) apart from the shared segments; the bundle
