@@ -288,3 +288,6 @@ Ideas (open):
   its cavity (elbow lead + leg_radius), tilts toward the axis and bends back at the throat. A
   26-way 13 x 2 header facing up, turning toward the wall: join ~31 mm out, legs within 10 mm.
   Raise `lead` on one fan to pass its elbow over a neighbouring fan's legs.
+- `check_interference(clearance=...)`: distances come back null when the named component is a
+  route cable inside a sub-assembly (Measure fails silently), so `violations` stays empty: report
+  that as not measured instead of "no violation".
