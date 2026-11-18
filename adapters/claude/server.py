@@ -158,7 +158,10 @@ def ensure_ready() -> str:
     (just attaches if it's already open). Does NOT open or create any document — use
     open_new_part / create_drawing for that (so assembly/drawing workflows aren't forced into a
     part). Safe to call anytime; idempotent. Call this first at the start of a session, or
-    whenever a tool fails with a connection / COM-attach error."""
+    whenever a tool fails with a connection / COM-attach error. Reports attached_pid (the
+    SolidWorks process the tools drive) and a WARNING when several SolidWorks processes run:
+    tools drive the instance the user started last (registered in the ROT as
+    SolidWorks_PID_<pid>), never a stale one that only holds the COM class registration."""
     global _state_version
     body = _ensure_ready()
     if not body.get("comAttached"):
@@ -175,7 +178,10 @@ def ensure_ready() -> str:
         f"sw_launched={body.get('swLaunched')} | "
         f"active_document={body.get('activeDocument')} | "
         f"sw_version={body.get('swVersion')} | "
+        f"attached_pid={body.get('attachedPid')} | "
         f"state_version={body.get('stateVersion')}"
+        + (f" | WARNING {body['instanceWarning']}" if body.get('instanceWarning') else "")
+        + (f" | {body['attachNote']}" if body.get('attachNote') else "")
     )
 
 
@@ -1902,6 +1908,7 @@ def check_path_clearance(
     ignore_same_parent: bool = False,
     limit: Annotated[int, Field(ge=1)] = 50,
     keep_probe: bool = False,
+    max_paths: Annotated[int, Field(ge=1)] = 24,
 ) -> str:
     """Is a candidate bundle path free in the ACTIVE ASSEMBLY, before any route or bundle part is
     drawn on it? Read-only for the model: builds the path as a circular-profile tube (same
@@ -1921,12 +1928,19 @@ def check_path_clearance(
     and where on the path: path (when several), leg (points k -> k+1), at_mm_along_path,
     near_corner. clearance_violations, nearest_mm, path_length_mm, `clear`.
     keep_probe=True leaves the tube in the assembly (probe_component) to look at; delete it with
-    edit_feature or close without saving."""
-    return _call("check_path_clearance", {
+    edit_feature or close without saving.
+    Each path is its own body; a path whose sweep fails is left out and listed in unswept_paths
+    (then clear=false). Keep probes small: more than max_paths paths are refused (30 fan legs
+    meeting at one join once crashed SOLIDWORKS in the interference check). Probe a fan's outer
+    legs and its bundle, not every leg."""
+    params = {
         "points": points, "diameter": diameter, "bend_radius": bend_radius,
         "bend_radii": bend_radii, "paths": paths, "clearance": clearance, "ignore": ignore,
         "include_hidden": include_hidden, "ignore_same_parent": ignore_same_parent,
-        "limit": limit, "keep_probe": keep_probe})
+        "limit": limit, "keep_probe": keep_probe}
+    if max_paths != 24:
+        params["max_paths"] = max_paths
+    return _call("check_path_clearance", params)
 
 
 @mcp.tool(structured_output=False)

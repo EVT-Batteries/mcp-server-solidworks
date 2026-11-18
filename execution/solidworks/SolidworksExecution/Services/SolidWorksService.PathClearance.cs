@@ -23,6 +23,8 @@ namespace SolidworksExecution.Services
             public double Diameter;
         }
 
+        private const int MaxProbePaths = 24;
+
         public ExecutionResponse CheckPathClearance(ToolRequest request)
         {
             if (_guard.IsDuplicate(request.OperationId))
@@ -56,6 +58,14 @@ namespace SolidworksExecution.Services
                 string perr = ParseProbePaths(p, paths);
                 if (perr != null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", perr);
+                // A probe of 30 thin fan legs that all ended in one join point (merged into one body)
+                // crashed SolidWorks during the interference check (2026-11-18). Keep probes small.
+                int maxPaths = p?.Value<int?>("max_paths") ?? MaxProbePaths;
+                if (paths.Count > maxPaths)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER",
+                        $"{paths.Count} paths in one probe (limit {maxPaths}): split it into several calls. Many tubes " +
+                        "meeting at one point (fan legs to a join) once crashed SolidWorks in the interference check; " +
+                        "probe a fan's outer legs and the bundle, not every leg.");
                 if (clearance < 0)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "INVALID_PARAMETER", "clearance must be >= 0 (meters).");
@@ -80,13 +90,18 @@ namespace SolidworksExecution.Services
                         "DOCUMENT_CREATION_FAILED", "Could not create the temporary probe part.");
                 var buildWarnings = new JArray();
                 var expected = new List<double>();
+                var unswept = new JArray();
                 for (int i = 0; i < paths.Count; i++)
                 {
+                    // A path whose sweep fails is reported (unswept_paths) and left out, instead of
+                    // failing the whole probe: callers used to retry without it, one call each.
                     string err = BuildProbeSweep(probeDoc, paths[i], i, buildWarnings, out double len);
-                    if (err != null)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "PROBE_FAILED", $"path {i}: {err}");
+                    if (err != null) unswept.Add(new JObject { ["path"] = i, ["error"] = err });
                     expected.Add(len);
                 }
+                if (unswept.Count == paths.Count)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "PROBE_FAILED",
+                        "no path could be swept: " + string.Join("; ", unswept.Select(u => $"path {u["path"]}: {u["error"]}")));
                 string dir = Path.Combine(Path.GetTempPath(), "solidpilot_probe");
                 Directory.CreateDirectory(dir);
                 // SolidWorks keeps a removed component's model in memory, so the previous probe file
@@ -197,7 +212,8 @@ namespace SolidworksExecution.Services
                                           "surface_only_count", "surface_only_neighbours", "surface_only_warning" })
                     if (ir[k] != null) result[k] = ir[k];
                 if (buildWarnings.Count > 0) result["path_warnings"] = buildWarnings;
-                result["clear"] = hits.Count == 0 && violations.Count == 0 && ir["warning"] == null && ir["surface_only_warning"] == null;
+                if (unswept.Count > 0) result["unswept_paths"] = unswept;
+                result["clear"] = hits.Count == 0 && violations.Count == 0 && unswept.Count == 0 && ir["warning"] == null && ir["surface_only_warning"] == null;
                 if (keep) result["probe_component"] = probeName;
                 if (!asmWasDirty && !keep)
                     result["note"] = "The assembly is now marked modified (a component was added and removed); its geometry is unchanged.";
@@ -341,11 +357,18 @@ namespace SolidworksExecution.Services
             if (def == null) return "CreateDefinition(sweep) returned null";
             def.CircularProfile = true;
             def.CircularProfileDiameter = path.Diameter;
+            // One body per path: merging tubes that meet or overlap (fan legs ending in one join)
+            // made the boolean fail ("the circular sweep failed") and built one huge body.
+            try { def.Merge = false; } catch { }
             feat.Select2(false, 4);
             try { def.Path = feat; } catch { }
             var sweep = fm.CreateFeature(def) as IFeature;
             doc.ClearSelection2(true);
-            if (sweep == null) return "the circular sweep failed (a bend radius below the bundle radius, or the path crosses itself)";
+            if (sweep == null)
+            {
+                try { feat.Select2(false, 0); doc.Extension.DeleteSelection2(0); doc.ClearSelection2(true); } catch { }
+                return "the circular sweep failed (a bend radius below the bundle radius, or the path crosses itself)";
+            }
             return null;
         }
 

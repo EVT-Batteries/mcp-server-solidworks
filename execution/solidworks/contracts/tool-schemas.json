@@ -895,7 +895,7 @@
   "output": "-> see execution-response.json - CadState.Features holds a single JSON string {assembly, checked, neighbours_checked?, neighbours? (not compact: instance paths), interference_count, interferences:[{components, volume_m3, volume_mm3, box_min?, box_max?, possible_only?}], interferences_truncated_at?, clearance?:{required_m, violation_count, violations:[{a, b, distance_m, distance_mm}], distances_mm? (not compact: every pair, null = not measured), nearest_m?, nearest_pair?, not_measured?}, lightweight_resolved?, resolved_from_lightweight?, lightweight_not_checked?, warning?, clear}."
  },
  "check_path_clearance": {
-  "description": "Active assembly: checks a candidate bundle path before anything is drawn on it. Builds the path(s) as circular-profile sweeps (filleted polyline, as create_3d_path) in a temporary part (default part template, saved under %TEMP%\\solidpilot_probe), inserts it at the assembly origin (identity transform), runs check_interference on that component (compact), maps each interference to the nearest path leg, then deletes the component, closes and deletes the part (unless keep_probe). Does not change state_version; the assembly is left marked modified.",
+  "description": "Active assembly: checks a candidate bundle path before anything is drawn on it. Builds the path(s) as circular-profile sweeps (filleted polyline, as create_3d_path) in a temporary part (default part template, saved under %TEMP%\\solidpilot_probe), inserts it at the assembly origin (identity transform), runs check_interference on that component (compact), maps each interference to the nearest path leg, then deletes the component, closes and deletes the part (unless keep_probe). Each path is its own body (no merge), a path whose sweep fails is left out and reported in unswept_paths (clear=false), and more than max_paths paths are refused. Does not change state_version; the assembly is left marked modified.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -910,10 +910,11 @@
     "include_hidden": "boolean (optional, default false)",
     "ignore_same_parent": "boolean (optional, default false)",
     "limit": "integer (optional, default 50)",
-    "keep_probe": "boolean (optional, default false - leave the probe component in the assembly)"
+    "keep_probe": "boolean (optional, default false - leave the probe component in the assembly)",
+    "max_paths": "integer (optional, default 24 - more paths in one probe are refused: split the call)"
    }
   },
-  "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, warning?, clear, probe_component?, note?, cleanup} ignored / ignored_hits / ignored_violations: hits of ignored components, located on the path like the others but left out of `clear`."
+  "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, unswept_paths?:[{path, error}], warning?, clear, probe_component?, note?, cleanup} ignored / ignored_hits / ignored_violations: hits of ignored components, located on the path like the others but left out of `clear`."
  },
  "import_step": {
   "description": "Imports a neutral file (STEP / IGES / Parasolid / SAT) through open_document's staged import, saves the import as a .SLDPRT (IModelDocExtension.SaveAs3; an assembly import becomes a multi-body part), closes the import document (ISldWorks.CloseDoc) and reopens the saved part (OpenDoc6) as the active document, so part queries work on it. Refuses to overwrite an existing part unless overwrite. Increments state_version.",

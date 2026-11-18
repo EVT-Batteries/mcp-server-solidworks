@@ -29,7 +29,7 @@ namespace SolidworksExecution.Services
         {
             try
             {
-                _solidWorks = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+                _solidWorks = AttachPreferred();
                 IsConnected = true;
                 EnsureVisible(); // the user must ALWAYS see what the automation does
                 return true;
@@ -90,7 +90,7 @@ namespace SolidworksExecution.Services
             {
                 try
                 {
-                    var probe = (ISldWorks)Marshal.GetActiveObject("SldWorks.Application");
+                    var probe = AttachPreferred();
                     probe.RevisionNumber(); // confirms responsive, not just registered
                     _solidWorks = probe;
                     EnsureVisible();
@@ -120,6 +120,7 @@ namespace SolidworksExecution.Services
                     result["activeDocument"] = d != null ? d.GetTitle() : null;
                 }
                 catch { /* attached but couldn't read the active doc — leave it unset */ }
+                AddInstanceInfo(result);
             }
             // Duplicate/hidden-instance diagnostic (KNOWN-LIMITATIONS #14). A count > 1 is the
             // condition under which automation can drive an instance the user is not watching, and a
@@ -220,6 +221,7 @@ namespace SolidworksExecution.Services
                     result["swVersion"] = _solidWorks.RevisionNumber();
                 }
                 catch { /* attached but couldn't read doc/version — leave unset */ }
+                AddInstanceInfo(result);
             }
             else if (!result.ContainsKey("launchError"))
             {

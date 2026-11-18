@@ -291,3 +291,34 @@ Ideas (open):
 - `check_interference(clearance=...)`: distances come back null when the named component is a
   route cable inside a sub-assembly (Measure fails silently), so `violations` stays empty: report
   that as not measured instead of "no violation".
+
+## Session 8 (a SOLIDWORKS crash during a probe, tools driving a stale instance, fan fillet room)
+
+- **Crash**: `check_path_clearance` with 30 thin fan legs that all end in one join point. Two
+  calls first failed with `PROBE_FAILED` ("the circular sweep failed") on legs whose tubes overlap
+  the others at the join (the sweeps merged into one body), and the third call (two legs left out)
+  killed SOLIDWORKS during the interference check ("The RPC server is unavailable"). Now:
+  - every probe sweep is its own body (`ISweepFeatureData.Merge = false`), so overlapping tubes
+    no longer fail the boolean;
+  - a path whose sweep still fails is deleted and listed in `unswept_paths` (`clear` false) instead
+    of failing the whole call (callers retried once per bad path);
+  - more than `max_paths` (default 24) paths in one probe are refused (`INVALID_PARAMETER`, "split
+    it"); probe a fan's outer legs and its bundle, not every leg.
+- **Stale instance**: after the crash `ensure_ready` launched SOLIDWORKS through COM. The user
+  later closed that window and started SOLIDWORKS again. The closed instance stayed alive (the
+  execution server held a reference), kept the `SldWorks.Application` active-object registration
+  and lost its `SolidWorks_PID_<pid>` ROT entry; `Marshal.GetActiveObject` kept returning it, so
+  every tool drove an instance the user could not see (no Routing add-in: `ROUTING_NOT_LOADED`;
+  documents opened there). `SolidWorksService.Attach.cs`: `AttachPreferred()` checks the
+  GetActiveObject instance's PID against the `SolidWorks_PID_<pid>` ROT entries and, when it has
+  none while another instance has one, binds the most recently started registered instance through
+  its ROT moniker and releases the stale reference. `ensure_ready` / `/health` report
+  `attachedPid`, `instanceWarning` (more than one SLDWORKS process) and `attachNote`; the adapter
+  prints them (after an MCP restart).
+- **Fan fillet room**: in `ConvergeFanLegs` a single-bend leg sized its fillet from the angle seen
+  from the stub end, not from the corner. On a turn fan tilted out of 90 deg (bend 60-85 deg) the
+  fillet overran the first straight by up to 1 mm (`min_straight_mm` -1.0 in the dry run). The
+  corner distance is now iterated from the corner's own deflection, like corner 1 of a two-bend
+  leg (every leg keeps >= `lead`).
+- Ideas: `fan_out` legs in the dry run could carry a ready-made probe list (outer legs only);
+  `converge_max_deg` has no effect on a small 2 x 3 header (its legs join on the arrival-angle limit).

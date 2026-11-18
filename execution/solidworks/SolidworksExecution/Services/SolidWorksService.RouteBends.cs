@@ -480,7 +480,12 @@ namespace SolidworksExecution.Services
                 {
                     var o = off[k]; double ol = Math.Sqrt(Dot(o, o));
                     // Single bend when the leg straight to the join already arrives within maxLegDeg.
-                    double s1 = lead + r * Math.Tan(Rad(Math.Max(0, Ang(dirs[k], Sub(jn, ends[k]))) / 2));
+                    // The fillet at the corner is sized from the corner's own deflection (seen from the
+                    // corner, not the stub end: a large bend sized from the stub end overran the first
+                    // straight by up to 1 mm on a tilted turn fan), iterated like corner 1 below.
+                    double s1 = lead;
+                    for (int it = 0; it < 8; it++)
+                        s1 = lead + r * Math.Tan(Rad(Math.Max(0, Ang(dirs[k], Sub(jn, Add(ends[k], Scale(dirs[k], s1))))) / 2));
                     var cs = Add(ends[k], Scale(dirs[k], s1));
                     if (Ang(Sub(jn, cs), b) <= maxLegDeg * 0.98 && ol <= rho * 1.5)
                     {
