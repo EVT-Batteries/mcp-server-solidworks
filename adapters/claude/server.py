@@ -1810,14 +1810,16 @@ def route_path(
         bending deeper by layer_step (default 0.0015 = one wire layer). A turn fan makes the
         wires further from the bundle side longer by their offset along the turn (a 40 mm row:
         up to 40 mm+ spread); for a wide row prefer converge and turn the bundle path instead.
-        converge (axial fans, no turn, no join; default false): two bends per outer leg, toward
+        converge (no join; default false; axial or turn fans): two bends per outer leg, toward
         the axis (at most converge_max_deg, default 45) right after the stub, then back at a
         throat point (the cavity offset scaled to throat_radius, default 0.9 mm * sqrt(wires),
         min 2 mm, so the wires keep their order), arriving within max_leg_angle_deg: the bundle
         forms inline about 2 plug widths closer than a single-bend axial fan (whose join sits
         offset / tan(max_leg_angle) out), with leg lengths close together
         (leg_length_spread_mm). Draw the bundle's turn as a filleted corner of the path leaving
-        the join. Legs near the axis keep one bend. An axial fan without converge reports
+        the join. Legs near the axis keep one bend. With turn, each leg first turns out of its cavity
+        (elbow lead + leg_radius out), then converges (a wide header facing a wall: raise lead on one
+        fan to lift its elbows over a neighbour's legs). An axial fan without converge reports
         converge_hint when converge would join more than 5 mm closer.
         Without join it is placed past the corners, just far enough for the arrival angle and
         each bend. Start the bundle at the join along turn. straight_legs=true: the old straight

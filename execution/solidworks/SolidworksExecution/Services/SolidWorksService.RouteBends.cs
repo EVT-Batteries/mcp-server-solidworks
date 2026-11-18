@@ -290,7 +290,7 @@ namespace SolidworksExecution.Services
             b = Unit(b ?? dm);
             bool turn = Dot(b, dm) < Math.Cos(30 * Math.PI / 180);
             if (throatRadius <= 0) throatRadius = Math.Max(0.002, 0.0009 * Math.Sqrt(n));
-            if (!turn && givenJoin == null && (convergeOpt ?? false))
+            if (givenJoin == null && (convergeOpt ?? false))
                 return ConvergeFanLegs(ends, dirs, b, r, maxLegDeg, lead, throatRadius, convergeMaxDeg, out join, report);
             double tanMax = Math.Tan(maxLegDeg * Math.PI / 180);
             double Ang(double[] u, double[] v) => Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(Unit(u), Unit(v))))) * 180 / Math.PI;
@@ -450,10 +450,16 @@ namespace SolidworksExecution.Services
             double Ang(double[] u, double[] v) => Math.Acos(Math.Max(-1.0, Math.Min(1.0, Dot(Unit(u), Unit(v))))) * 180 / Math.PI;
             double Rad(double deg) => deg * Math.PI / 180;
             double[] m = { ends.Average(q => q[0]), ends.Average(q => q[1]), ends.Average(q => q[2]) };
+            // Turn fan (bundle direction across the exit): every wire first turns out of its cavity
+            // (an elbow lead + r out), so the throat line runs through the elbows, not the stub ends.
+            double[] dmean = Unit(new[] { dirs.Average(q => q[0]), dirs.Average(q => q[1]), dirs.Average(q => q[2]) });
+            bool turn = Dot(b, dmean) < Math.Cos(30 * Math.PI / 180);
+            double elbow = turn ? lead + r : 0.0;
+            m = Add(m, Scale(dmean, elbow));
             var off = new double[n][]; var ax = new double[n];
             for (int k = 0; k < n; k++)
             {
-                var d = Sub(ends[k], m); ax[k] = Dot(d, b);
+                var d = Sub(Add(ends[k], Scale(dirs[k], elbow)), m); ax[k] = Dot(d, b);
                 off[k] = Sub(d, Scale(b, ax[k]));
             }
             double omax = off.Max(o => Math.Sqrt(Dot(o, o)));
@@ -530,7 +536,7 @@ namespace SolidworksExecution.Services
                     ["length_mm"] = Math.Round(len * 1000, 2),
                 });
             }
-            report["shape"] = "axial";
+            report["shape"] = turn ? "turn" : "axial";
             report["converge"] = true;
             report["throat_radius_mm"] = Math.Round(rho * 1000, 2);
             report["join_distance_mm"] = Math.Round(Dot(Sub(join, m), b) * 1000, 2);

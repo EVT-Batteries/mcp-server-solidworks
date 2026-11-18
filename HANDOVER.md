@@ -284,3 +284,7 @@ Ideas (open):
   when a call exceeds a time limit.
 - Ideas: a `throat_shape` (round instead of the scaled flat row) for a rounder bundle start;
   converge for turn fans (converge axially, then a bundle bend inside the fan).
+- `converge` now also works on turn fans (bundle direction across the exit): each leg turns out of
+  its cavity (elbow lead + leg_radius), tilts toward the axis and bends back at the throat. A
+  26-way 13 x 2 header facing up, turning toward the wall: join ~31 mm out, legs within 10 mm.
+  Raise `lead` on one fan to pass its elbow over a neighbouring fan's legs.
