@@ -320,5 +320,11 @@ Ideas (open):
   fillet overran the first straight by up to 1 mm (`min_straight_mm` -1.0 in the dry run). The
   corner distance is now iterated from the corner's own deflection, like corner 1 of a two-bend
   leg (every leg keeps >= `lead`).
+- Tool gap: no tool moves or deletes a sketch entity. Moving two undimensioned hole circles of a
+  cut sketch (to keep the mates on the cut's faces) needed a pywin32 script: bind the instance
+  through its `SolidWorks_PID_<pid>` ROT entry (`GetActiveObject` can return a stale one), early
+  bound wrappers from `gencache.EnsureModule` of the SldWorks type library (late binding fails on
+  returned objects), `EditSketch`, `ISketchPoint.SetCoords`, `InsertSketch2`. Idea: an
+  `edit_sketch_geometry` tool (move points / circle centres, delete entities).
 - Ideas: `fan_out` legs in the dry run could carry a ready-made probe list (outer legs only);
   `converge_max_deg` has no effect on a small 2 x 3 header (its legs join on the arrival-angle limit).
