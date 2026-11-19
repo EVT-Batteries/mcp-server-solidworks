@@ -1052,6 +1052,44 @@
   },
   "output": "-> see execution-response.json - Features[0] = JSON {route, route_transform, sketch:{segments, length_mm, open_ends}, drawn_length_mm?, wires?, segments?, bends?, steps, warnings?} dry_run: {route, dry_run, points, geometry:{length_mm, min_straight_mm, corners, legs}, junctions[{path, at_mm, kink_deg, straightest, segments_at_node}], sharp_junctions, steps, warnings?}."
  },
+ "flatten_route": {
+  "description": "Active assembly: flattens an electrical route sub-assembly (IRouteManager.CreateFlattenRoute with drawingOption=false: SOLIDWORKS' own drawing throws before its first table when the connectors are parent-assembly components). Adds a '<Type>FlattenedRoute<n> - <config>' configuration to the route assembly and saves the route assembly (unless read-only), then reads every route segment's 3D length (route edited in context) and flat length (IElectricalFlatRoute.GetSketchSegments). Increments state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "route": "string (required - route sub-assembly instance)",
+    "type": "string (optional, default manufacture - manufacture | annotation)",
+    "connector_display": "string (optional, default 3d - 3d | blocks)",
+    "formboard_width": "number (optional, default 1.0, meters)",
+    "formboard_height": "number (optional, default 0.6, meters)",
+    "segment_orientation": "string (optional, default horizontal - horizontal | vertical)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {route, route_file, code, flattened_route, configuration, type, route_saved?, save_warning?, segments[{id, length_3d_mm, length_flat_mm}], max_segment_length_diff_mm, flat_box_mm, wires, warning?, note}"
+ },
+ "route_drawing": {
+  "description": "Active assembly: creates and saves a drawing of a flattened route: sheet (auto size / scale, sheet format from the sheet format folders), the *Front view of the flattened configuration (made while the route assembly shows that configuration), connector labels at each connector's flat end (wire stubs found from the connectors' connection points, IElectricalFlatRoute.GetSketchSegments), bundle length notes, the circuit summary (IView.InsertBomTable4 with a BOM template) and one general table per connector built from the route's wires; optional PDF. Increments state_version; the drawing stays active.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "route": "string (required - route sub-assembly instance)",
+    "file_path": "string (required - .SLDDRW path)",
+    "flattened_route": "string (optional - FlattenedRoute feature, default the latest)",
+    "sheet": "string (optional, default auto - auto | A4 | A3 | A2 | A1 | A0)",
+    "scale": "number (optional, default 0 = auto)",
+    "title": "string (optional - note at the top left)",
+    "pdf_path": "string (optional - also export a PDF)",
+    "circuit_summary": "boolean (optional, default true)",
+    "connector_tables": "boolean (optional, default true)",
+    "segment_lengths": "boolean (optional, default true)",
+    "drawing_template": "string (optional - .drwdot, default the user default)",
+    "circuit_summary_template": "string (optional - .sldbomtbt, default the install's bom-circuit-summary)"
+   }
+  },
+  "output": "-> see execution-response.json - Features[0] = JSON {drawing, pdf, route, flattened_route, configuration, sheet, scale, flat_size_mm, view_outline_mm, connectors[{reference, part, wires, flat_end_mm?, label_at_mm?}], tables[{kind, reference?, rows, columns?, at_mm}], bundle_length_notes[{segment, wires, length_mm}], wires, warnings?, note}"
+ },
  "route_covering": {
   "description": "Active assembly: lists, adds or removes coverings on the route segments of an electrical route (route component edited for the Routing API: IElectricalRoute.GetRouteProperty, IRouteProperty.CreateCovering / AddCovering / GetCovering / RemoveCovering / HasCovering, ICovering Name / PartNumber / OuterDiameter / Color set on the attached covering). Segments by id, exact wire set or minimum wire count. Whole segments only (Split Route / Fixed Length Covering are not in the API). add / remove increment state_version; list is read-only.",
   "input": {

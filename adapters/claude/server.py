@@ -1944,6 +1944,75 @@ def check_path_clearance(
 
 
 @mcp.tool(structured_output=False)
+def flatten_route(
+    route: str,
+    type: Literal["manufacture", "annotation"] = "manufacture",
+    connector_display: Literal["3d", "blocks"] = "3d",
+    formboard_width: Annotated[float, Field(gt=0)] = 1.0,
+    formboard_height: Annotated[float, Field(gt=0)] = 0.6,
+    segment_orientation: Literal["horizontal", "vertical"] = "horizontal",
+) -> str:
+    """Flatten an electrical route (SOLIDWORKS Routing Flatten Route, IRouteManager.CreateFlattenRoute)
+    for a 2D harness / formboard drawing. Bumps state_version.
+    The ACTIVE document must be the assembly that holds the route sub-assembly (and its connectors).
+    route: the route sub-assembly instance (routing_status route_assemblies).
+    type: 'manufacture' (formboard layout: bundles straight, true lengths) or 'annotation'.
+    connector_display / formboard_width / formboard_height (m) / segment_orientation: as in the
+        Flatten Route PropertyManager (formboard and orientation apply to manufacture only).
+    Adds a configuration '<Type>FlattenedRoute<n> - <config>' to the route assembly (planar 3D sketch,
+    a FlattenedRoute feature, a virtual flattened cable part); the 3D route stays in its configuration.
+    The route assembly is SAVED afterwards (the flattened cable is a virtual part that drawings only
+    show once saved; SOLIDWORKS' own flatten saves it too); never on a read-only path.
+    SOLIDWORKS' own drawing option is not used: with the connectors in the parent assembly it throws
+    before its first table. Use route_drawing for the drawing.
+    Returns flattened_route (feature name), configuration, route_saved, flat_box_mm, and per route
+    segment its 3D and flat length (max_segment_length_diff_mm: the flat lengths must equal the 3D ones)."""
+    return _call("flatten_route", {
+        "route": route, "type": type, "connector_display": connector_display,
+        "formboard_width": formboard_width, "formboard_height": formboard_height,
+        "segment_orientation": segment_orientation})
+
+
+@mcp.tool(structured_output=False)
+def route_drawing(
+    route: str,
+    file_path: str,
+    flattened_route: str = "",
+    sheet: Literal["auto", "A4", "A3", "A2", "A1", "A0"] = "auto",
+    scale: Annotated[float, Field(ge=0)] = 0.0,
+    title: str = "",
+    pdf_path: str = "",
+    circuit_summary: bool = True,
+    connector_tables: bool = True,
+    segment_lengths: bool = True,
+    drawing_template: str = "",
+    circuit_summary_template: str = "",
+) -> str:
+    """2D harness drawing of a flattened route (run flatten_route first). Creates and saves a new
+    drawing (it stays open and active). Bumps state_version.
+    The ACTIVE document must be the assembly that holds the route sub-assembly and its connectors.
+    route: the route sub-assembly instance; flattened_route: its FlattenedRoute feature (default the
+        latest); file_path: the .SLDDRW to write (never a read-only location); pdf_path: also export a PDF.
+    sheet / scale: 'auto' picks the smallest ISO landscape sheet that holds the flat view at 1:1 (else
+        1:2, 1:5, 1:10) with the tables under it; scale 0 = auto (1.0 = 1:1). Sheet format from the
+        SOLIDWORKS sheet format folders ('<size> - landscape.slddrt'), drawing template from the
+        default (drawing_template overrides).
+    Content: the flat view (*Front of the flattened configuration); a label (reference + part) at each
+    connector's end of the flat harness; a note with the length on every route segment carrying two
+    wires or more (segment_lengths); the circuit summary (BOM-type table from the route:
+    bom-circuit-summary.sldbomtbt of the install, or circuit_summary_template); one table per connector
+    (pin, wire, spec, other end, routed length), built from the route's wires, because SOLIDWORKS'
+    connector tables need the connectors inside the route assembly. title: a note at the top left.
+    Returns drawing, pdf, sheet, scale, flat_size_mm, view_outline_mm, connectors (flat end, label
+    position), tables, bundle_length_notes, warnings."""
+    return _call("route_drawing", {
+        "route": route, "file_path": file_path, "flattened_route": flattened_route, "sheet": sheet,
+        "scale": scale, "title": title, "pdf_path": pdf_path, "circuit_summary": circuit_summary,
+        "connector_tables": connector_tables, "segment_lengths": segment_lengths,
+        "drawing_template": drawing_template, "circuit_summary_template": circuit_summary_template})
+
+
+@mcp.tool(structured_output=False)
 def route_covering(
     route: str,
     action: Literal["list", "add", "remove"] = "list",

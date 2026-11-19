@@ -328,3 +328,51 @@ Ideas (open):
   `edit_sketch_geometry` tool (move points / circle centres, delete entities).
 - Ideas: `fan_out` legs in the dry run could carry a ready-made probe list (outer legs only);
   `converge_max_deg` has no effect on a small 2 x 3 header (its legs join on the arrival-angle limit).
+
+## Session 9 (flattened routes and 2D harness drawings: flatten_route, route_drawing)
+
+- `IRouteManager.CreateFlattenRoute(flattenType, connectorOption, formboardWidth, formboardHeight,
+  segmentOrientation, drawingOption, sheetFormat, elecBOM, cutList, connectorTable, autoBalloons)`
+  (select the route component in its parent assembly first). With `drawingOption=true` SOLIDWORKS
+  makes the drawing and its view, then throws RPC_E_SERVERFAULT ("The server threw an exception")
+  before the first table, with any templates (the connector table must be a `.sldbomtbt`, not the
+  `.sldtbt`), whenever the connectors are components of the PARENT assembly (the normal Routing
+  layout); its connector blocks then read "External Connector". With `drawingOption=false` the
+  flatten works (return 0; `swFlattenRouteErrorType_e` 1-4 are errors): a configuration
+  `<Type>FlattenedRoute<n> - <config>` in the route assembly, a planar 3D sketch (Z = 0), a
+  FlattenedRoute feature and a virtual `Flattened_Cable^<route>` part; the 3D route is untouched.
+  SOLIDWORKS leaves the route assembly active in the flat configuration and saves it.
+- `flatten_route` = that flatten + the route assembly saved (a drawing view shows the flattened
+  cable only once saved) + every route segment's 3D length (`IElectricalRoute.GetSketchSegments`
+  while the route is edited in context) against its flat length
+  (`IRouteManager.GetElectricalFlatRoute(<FlattenedRoute feature name>)`, not the configuration
+  name; the route assembly must be active in the flat configuration). First harness: 0.002 mm max.
+- `route_drawing` builds the drawing itself:
+  - the view must be created while the route assembly SHOWS the flat configuration
+    (`ShowConfiguration2`, restored after); a view made otherwise and switched with
+    `ReferencedConfiguration` kept the 3D cable component (empty-looking view);
+  - connector positions: `IElectricalFlatRoute.GetConnectorData(name)` found no connector by any
+    name tried (component name, reference, instance path) for parent-assembly connectors, so each
+    wire end is located through its stub: the route segment whose 3D sketch touches the connector's
+    connection point (`ConnectorPointsWorld`, mapped into the route frame), then the end of that
+    segment's flat sketch FARTHEST from the wire's other segments (flat legs meet the bundle through
+    short splines that may belong to another segment, so "not coincident" picked the wrong end);
+  - circuit summary: `IView.InsertBomTable4(false, x, y, 1, 2, flatConfig, bom-circuit-summary.sldbomtbt,
+    ...)` (with `UseAnchorPoint=true` it jumps to the sheet format's BOM anchor) lists every wire with
+    colour, length and from / to pins; the standard BOM template listed only some wires;
+  - connector tables: general tables (`IDrawingDoc.InsertTableAnnotation2`, `MergeCells`, `Text`)
+    from the route's wires; labels and bundle lengths as notes (`InsertNote` +
+    `IAnnotation.SetPosition2`; a note's anchor is its top-left corner);
+  - auto sheet: smallest ISO landscape sheet that holds the flat view at 1:1 plus the tables, sheet
+    format `<size> - landscape.slddrt` from the sheet format folders (`swFileLocationsSheetFormat`).
+- Test 2026-11-18 (then undone): connectors moved INTO the route sub-assembly
+  (`IAssemblyDoc.ReorganizeComponents`, positions kept, route still routed) do not fix it:
+  CreateFlattenRoute(drawingOption=true) still throws before the first table, the flat harness ends
+  still carry "External Connector" boxes and the connectors show as a separate row of 3D models
+  away from the harness. The 2022+ "external connectors" selection of the Flatten Route
+  PropertyManager has no API parameter (CreateFlattenRoute is the 2011 signature). Decision (user):
+  no SOLIDWORKS 2D flatten for now; the harness 2D drawings are made in the ECAD layout from the 3D
+  route data. flatten_route / route_drawing stay as tools (flat-vs-3D length check, quick drawing).
+- Ideas: fill the title block (drawing custom properties); wire colours on the flat legs; connector
+  drawing blocks for the "blocks" display; dimensions instead of notes for bundle lengths; place
+  each connector table next to its connector; a formboard sheet split for long harnesses.
