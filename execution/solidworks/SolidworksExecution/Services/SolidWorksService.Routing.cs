@@ -1049,6 +1049,7 @@ namespace SolidworksExecution.Services
                 // than max_kink_deg off its straightest neighbour, and sharp corners over it.
                 double maxKinkDeg = p?.Value<double?>("max_kink_deg") ?? 15.0;
                 bool allowSharp = p?.Value<bool?>("allow_sharp_junctions") ?? false;
+                bool allowCycles = p?.Value<bool?>("allow_cycles") ?? false;
                 bool enteredHere = false;
                 bool Given(string k) { string v = p?.Value<string>(k); return !string.IsNullOrWhiteSpace(v) && v.Trim() != "[]"; }
                 if (dryRun && !Given("points") && !Given("paths") && !Given("fan_out"))
@@ -1392,6 +1393,20 @@ namespace SolidworksExecution.Services
                     }
                     var kinkViolations = new List<string>();
                     var junctions = JunctionKinks(sk, jobs, maxKinkDeg, kinkViolations);
+                    var cycleViolations = RouteCycles(sk, jobs, includeSketch: !dryRun || jobs.Count == 1, tol: snapTol);
+                    if (cycleViolations.Count > 0 && !allowCycles && !dryRun)
+                    {
+                        if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); } catch { } }
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "ROUTE_CYCLE",
+                            $"Nothing drawn: {cycleViolations.Count} closed cycle(s) in the 3D route sketch: "
+                            + string.Join("; ", cycleViolations.Take(8))
+                            + (cycleViolations.Count > 8 ? $"; ... ({cycleViolations.Count - 8} more)" : "")
+                            + ". SOLIDWORKS Routing's ExitRoute() / RouteWires() solver hangs indefinitely on cyclic 3D route sketches. "
+                            + "Keep the route sketch an acyclic tree: split bidirectional connectors into separate fan groups and run co-bundled "
+                            + "through-traces parallel (> snap_tolerance apart) inside the outer sleeve without sharing loop-closing vertices. "
+                            + "allow_cycles=true draws anyway.");
+                    }
+                    foreach (var cv in cycleViolations) warnings.Add("route cycle: " + cv);
                     if (kinkViolations.Count > 0 && !allowSharp && !dryRun)
                     {
                         if (enteredHere) { try { rm.ExitRoute(); asm.EditAssembly(); } catch { } }
@@ -1436,6 +1451,8 @@ namespace SolidworksExecution.Services
                         if (fanReport.Count > 0) dr["fan_out"] = fanReport;
                         dr["junctions"] = junctions;
                         dr["sharp_junctions"] = kinkViolations.Count;
+                        dr["cycles"] = new JArray(cycleViolations);
+                        dr["cycle_count"] = cycleViolations.Count;
                         dr["steps"] = steps;
                         if (warnings.Count > 0) dr["warnings"] = warnings;
                         return ReadOnlyResponse(request, doc, dr);

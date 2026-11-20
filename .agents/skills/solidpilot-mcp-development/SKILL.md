@@ -242,7 +242,20 @@ Results are in `$r.cadState.features` (often one JSON string).
     then `AddCovering(cov)` attaches a copy; set Name / PartNumber / OuterDiameter / Color on
     `GetCovering()` after adding (set before, OuterDiameter read back 0). `RemoveCovering()` has no
     argument and returns void. Whole segments only: Split Route, Fixed Length Covering, Add Bends
-    and Repair Route are not in the Routing API.
+    and Repair Route are not in the Routing API. `AddCovering` / `RemoveCovering` do not set
+    SOLIDWORKS' dirty flag (`GetSaveFlag`) on the route sub-assembly, so `save_document` on the
+    parent skipped saving coverings (`saved_references: 0`) until `RouteCovering` called
+    `IModelDoc2.SetSaveFlag()` on the route document (2026-11-19).
+  - Closed cycles in `3DSketch1` (2026-11-19): SOLIDWORKS Routing's `ExitRoute()` / `RouteWires()`
+    solver hangs indefinitely at 100% CPU when the 3D route sketch contains a closed loop (e.g.
+    two local Y-fillet branches plus a straight backbone bar sharing the same vertices).
+    `RouteCycles` in `SolidWorksService.RouteBends.cs` checks the endpoint graph before drawing
+    and refuses cyclic sketches with `ROUTE_CYCLE` (and reports `cycles` / `cycle_count` in
+    `dry_run`).
+  - Lightweight configuration switches (2026-11-19): switching lightweight nested components
+    directly to another configuration (`ReferencedConfiguration`) in a large assembly can fail to
+    apply the configuration on the first pass and let mates against still-lightweight neighbours
+    drift. Resolve all lightweight components first (`check_rebuild(resolve_lightweight=True)`).
   - Lightweight connectors (large-assembly mode keeps 1000+ components lightweight even with
     `OpenDoc7` LightWeight false) cannot be resolved by the wires' Component Reference: Edit Wires
     shows "'From' or 'To' component was not found" and the wire paths are lost (magenta). Resolve

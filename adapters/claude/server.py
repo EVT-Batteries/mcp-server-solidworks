@@ -1779,6 +1779,7 @@ def route_path(
     fan_out: str = "[]",
     max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0,
     allow_sharp_junctions: bool = False,
+    allow_cycles: bool = False,
 ) -> str:
     """Draw route geometry in a SOLIDWORKS Routing route of the ACTIVE ASSEMBLY (one bundle per
     call with points, or many with paths / fan_out). Bumps state_version. To redraw a bundle, delete the route
@@ -1862,6 +1863,12 @@ def route_path(
       Y-shaped breakout, branches splitting by <= max_kink_deg each), then a filleted corner at
       least r*tan(deflection/2) further on. allow_sharp_junctions=True draws anyway (warnings).
       A dry run lists every junction (path end, kink_deg, the straightest neighbour).
+    - ROUTE_CYCLE: SOLIDWORKS Routing's ExitRoute() / RouteWires() solver hangs indefinitely at
+      100% CPU when the 3D route sketch contains a closed loop (e.g. two local Y-fillet branches
+      plus a backbone bar sharing the same vertices). Keep the route sketch an acyclic tree:
+      split bidirectional connectors into separate fan groups and run co-bundled through-traces
+      parallel (> snap_tolerance apart) inside the outer sleeve without sharing loop-closing
+      vertices. A dry run reports cycles / cycle_count. allow_cycles=True draws anyway.
     dry_run=True: snap and check, then return the points as they would be drawn and their
     geometry (length_mm, per corner deflection / radius / tangent, per leg length and straight
     rest, min_straight_mm < 0 = radii too big) without drawing. It reads the route sketch without
@@ -1886,6 +1893,8 @@ def route_path(
         params["max_kink_deg"] = max_kink_deg
     if allow_sharp_junctions:
         params["allow_sharp_junctions"] = True
+    if allow_cycles:
+        params["allow_cycles"] = True
     if wire_paths and wire_paths.strip() not in ("", "{}"):
         params["wire_paths"] = wire_paths
     if paths and paths.strip() not in ("", "[]"):
@@ -2037,7 +2046,9 @@ def route_covering(
     bundle's outside diameter; color: JSON [r, g, b].
     A covering applies to whole route segments, as the Covering PropertyManager does. A covering on
     part of a segment (a manufacturer's free zone at a housing) needs SOLIDWORKS' Split Route or
-    Fixed Length Covering first, which the Routing API does not offer: do that in the GUI."""
+    Fixed Length Covering first, which the Routing API does not offer: do that in the GUI.
+    Marks the route sub-assembly modified (SetSaveFlag) when segments change so save_document
+    persists the coverings."""
     params = {"route": route, "action": action, "min_wires": min_wires, "name": name,
               "part_number": part_number, "outer_diameter": outer_diameter}
     if segments.strip():

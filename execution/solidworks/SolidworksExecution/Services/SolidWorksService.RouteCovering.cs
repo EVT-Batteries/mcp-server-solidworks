@@ -76,6 +76,7 @@ namespace SolidworksExecution.Services
                 var steps = new JArray();
                 var warnings = new JArray();
                 var segOut = new JArray();
+                int changed = 0;
                 doc.ClearSelection2(true);
                 routeComp.Select4(false, null, false);
                 asm.EditAssembly();
@@ -102,7 +103,6 @@ namespace SolidworksExecution.Services
                     object idsObj = rm.GetAllRouteSegmentIDs();
                     if (idsObj is int[] ia) allIds.AddRange(ia);
                     else if (idsObj is object[] oa) allIds.AddRange(oa.Select(Convert.ToInt32));
-                    int changed = 0;
                     foreach (int id in allIds)
                     {
                         wiresOf.TryGetValue(id, out var wset);
@@ -175,7 +175,17 @@ namespace SolidworksExecution.Services
                     try { asm.EditAssembly(); } catch { }
                     doc.ClearSelection2(true);
                 }
-                if (action != "list") { try { doc.EditRebuild3(); } catch { } }
+                if (action != "list")
+                {
+                    try { doc.EditRebuild3(); } catch { }
+                    if (changed > 0)
+                    {
+                        // IRouteProperty.AddCovering / RemoveCovering do not set SOLIDWORKS' dirty flag on the
+                        // route sub-assembly, so save_document() on the parent would otherwise skip saving it.
+                        try { (routeAsm as IModelDoc2)?.SetSaveFlag(); } catch { }
+                        try { doc.SetSaveFlag(); } catch { }
+                    }
+                }
                 var result = new JObject
                 {
                     ["route"] = ComponentPath(routeComp),

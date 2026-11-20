@@ -592,5 +592,75 @@ namespace SolidworksExecution.Services
             reached = MaxAngle(hi);
             return hi;
         }
+
+        // Detect closed cycles in the route endpoint graph before drawing. SOLIDWORKS Routing's
+        // ExitRoute() / RouteWires() solver hangs indefinitely at 100% CPU when 3DSketch1 contains
+        // a closed loop (e.g., two Y-fillet branches and a backbone bar sharing the same vertices).
+        // Each polyline contributes one edge between its snapped start and end points; when
+        // includeSketch is true (live draw or incremental single-path dry run), existing sketch
+        // segments are included as well. Returns a human-readable description for each cycle-closing
+        // edge found.
+        private static List<string> RouteCycles(
+            ISketch sk,
+            List<Tuple<string, List<double[]>, double[]>> jobs,
+            bool includeSketch,
+            double tol)
+        {
+            var cycles = new List<string>();
+            double nodeTol = Math.Max(tol, NodeTolerance);
+            var nodes = new List<double[]>();
+            var parent = new List<int>();
+            int FindNode(double[] pt)
+            {
+                for (int i = 0; i < nodes.Count; i++)
+                    if (Dist(nodes[i], pt) <= nodeTol) return i;
+                int id = nodes.Count;
+                nodes.Add(pt);
+                parent.Add(id);
+                return id;
+            }
+            int Root(int x)
+            {
+                while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                return x;
+            }
+            string Fmt(double[] pt) =>
+                $"[{Math.Round(pt[0] * 1000, 1)}, {Math.Round(pt[1] * 1000, 1)}, {Math.Round(pt[2] * 1000, 1)}] mm";
+
+            if (includeSketch && sk != null)
+            {
+                if (sk.GetSketchSegments() is object[] segs)
+                {
+                    foreach (var o in segs)
+                    {
+                        var seg = o as ISketchSegment;
+                        if (seg == null) continue;
+                        try { if (seg.ConstructionGeometry) continue; } catch { }
+                        var ends = SegmentEnds(seg);
+                        if (ends == null || ends.Count < 2) continue;
+                        int u = FindNode(ends[0].Item1);
+                        int v = FindNode(ends[1].Item1);
+                        int ru = Root(u), rv = Root(v);
+                        if (ru != rv) parent[ru] = rv;
+                    }
+                }
+            }
+
+            foreach (var job in jobs)
+            {
+                var pts = job.Item2;
+                if (pts == null || pts.Count < 2) continue;
+                var a = pts[0];
+                var b = pts[pts.Count - 1];
+                int u = FindNode(a);
+                int v = FindNode(b);
+                int ru = Root(u), rv = Root(v);
+                if (ru == rv)
+                    cycles.Add($"{job.Item1} closes a cycle between {Fmt(a)} and {Fmt(b)}");
+                else
+                    parent[ru] = rv;
+            }
+            return cycles;
+        }
     }
 }
