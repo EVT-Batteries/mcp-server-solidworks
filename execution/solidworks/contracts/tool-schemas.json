@@ -300,6 +300,26 @@
   },
   "output": "{ status, comAttached, swLaunched, activeDocument, swVersion, stateVersion } (or comAttached=false + launchError/ensureError on failure; ensureError also carries solidworksProcessCount when the attach failed while a process was running)"
  },
+ "start_job": {
+  "description": "ADAPTER-SIDE (never sent to the execution server as such): runs another tool of the adapter in a background thread and returns a job id at once; the tool's own calls go to the execution server with JOB_HTTP_TIMEOUT (default 14400 s) instead of LONG_HTTP_TIMEOUT. Jobs live in the adapter process.",
+  "input": {
+   "params": {
+    "tool": "string (required - the tool's name, e.g. route_path)",
+    "args": "string (optional, default '{}' - JSON object of the tool's arguments as it takes them)"
+   }
+  },
+  "output": "STARTED | job_id=<id> | tool=<name> (| WARNING jobs still running: ...)"
+ },
+ "job_status": {
+  "description": "ADAPTER-SIDE: the status of a start_job job (or every job when job_id is empty), optionally waiting up to wait_s for it to finish. Never calls SolidWorks.",
+  "input": {
+   "params": {
+    "job_id": "string (optional - empty lists every job)",
+    "wait_s": "number (optional, default 0, max 600 - seconds to wait for the job to finish)"
+   }
+  },
+  "output": "RUNNING | DONE (with the tool's result text) | FAILED (raised, with the tool's error); empty job_id: one line per job"
+ },
  "export_document": {
   "description": "Exports the active SolidWorks document to a file without closing it. DWG/DXF require an active drawing document. PDF uses SolidWorks PDF export options. state_version is NOT incremented (no CAD state change).",
   "input": {
@@ -552,7 +572,8 @@
     "zoom_to_fit": "boolean (optional, default true)",
     "width": "integer (optional, default 0 = window width — image width in pixels)",
     "height": "integer (optional, default 0 = window height — image height in pixels)",
-    "caption": "string (optional — text drawn in a white band under the image, lines split on '\\n', first line bold)",
+    "caption": "string (optional — text drawn in a white band under the image, lines split on a line break or a typed backslash-n, first line bold)",
+    "up": "string (optional, default 'y' — 'y': SolidWorks' standard (Y-up) views; 'z': the same views for a Z-up model, the view rotation R from ShowNamedView2 replaced by M·R (IModelView.Orientation3) with M taking (x, y, z) to (x, z, -y))",
     "zoom_box": "number[6] (optional - [x1,y1,z1,x2,y2,z2] in meters, model coordinates: the 8 corners are projected into the view frame (IModelView.Orientation3) and passed to IModelDoc2.ViewZoomTo2; where the box lands (IModelView.Transform) is then measured and the rectangle shifted until it is centred)",
     "focus": "string or array (optional - JSON list of component names / instance paths: zoom on their world bounding box, as zoom_box)",
     "isolate": "boolean (optional, default false - IAssemblyDoc.Isolate on the focus components for the capture, ExitIsolate afterwards)",
@@ -939,7 +960,10 @@
     "verbose": "boolean (optional, default false - every routing library location and the from-to header definitions)",
     "connectors": "string (optional - JSON list of component names / instance paths, or a name fragment: their reference designator and connection points (pin, location, direction, stub end) in the active assembly's coordinates)",
     "terminations": "string (optional - JSON {\"<REF>.<pin>\" | \"<REF>\" | \"*\": allowance_mm | {allowance_mm, strip_mm, ...}}: per-end wire length beyond the route end; adds termination and total_cut_length_mm to each wire)",
-    "max_kink_deg": "number (optional, degrees, default 15 - a wire turning more than this at a node of its path (where its route segments meet, or a corner without an arc inside one) is listed in sharp_bends: SOLIDWORKS checks arcs only)"
+    "max_kink_deg": "number (optional, degrees, default 15 - a wire turning more than this at a node of its path (where its route segments meet, or a corner without an arc inside one) is listed in sharp_bends: SOLIDWORKS checks arcs only)",
+    "csv_path": "string (optional, ADAPTER-SIDE, not sent to the execution server - with route: write the wire table (Wire, From, To, Spec, CutLength_mm, MinArcRadius_mm, MaxKink_deg, Errors[, TotalCutLength_mm]) to this CSV)",
+    "compare_to": "string (optional, ADAPTER-SIDE - an earlier wire table CSV: adds Previous_mm / Delta_mm and lists the wires changed by more than 1 mm)",
+    "csv_note": "string (optional, ADAPTER-SIDE - a '# ' comment first line for the CSV)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, connectors?:[{component, reference?, connection_points[{name, pin, location_mm, direction, stub_mm, stub_end_mm}]}], route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm, max_kink_deg, min_arc_radius_mm?, sharp_bends?[{at_mm, kink_deg, where}], termination?{from, to}, total_cut_length_mm?}], bends:{max_kink_deg_allowed, sharp_bend_nodes, sharp_bends[{at_mm, kink_deg, where, wires}], note}, terminations?, terminations_missing?, cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
@@ -984,13 +1008,13 @@
   "output": "-> see execution-response.json - Features[0] = JSON {document, direction, view_right, view_up, face_indices, face_height_mm, cavity_count, rows, columns, row_pitch_mm, column_pitch_mm, cavity_size_mm, numbering?, cavities[{pin?, row, col, face_index, u_mm, v_mm, width_mm, height_mm, point}], pins?[{pin, point}], other_openings, warnings?}"
  },
  "add_connector_pins": {
-  "description": "Active part (a connector housing): one electrical connection point per pin at its cavity on the wire-exit face (one 3D sketch of points, FeatureManager.InsertConnectionPoint with the face, recreated reversed if it points into the housing), each named <prefix><pin> and given its pin number (IConnectionPointFeatureData.ElectricalPinID via ModifyDefinition); optionally deletes the existing connection points first; sets the Routing component type to connector (electrical). Bumps state_version.",
+  "description": "Active part (a connector housing): one electrical connection point per pin at its cavity on the wire-exit face (one 3D sketch of points per exit direction, FeatureManager.InsertConnectionPoint with the face, recreated reversed if it points into the housing), each named <prefix><pin> and given its pin number (IConnectionPointFeatureData.ElectricalPinID via ModifyDefinition); optionally deletes the existing connection points first; sets the Routing component type to connector (electrical). Fails with ROUTING_NOT_LOADED when the Routing add-in is not loaded (GetAddInObject). Bumps state_version.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "pins": "string (required - JSON [{pin, point:[x,y,z]}] m, part coordinates)",
-    "direction": "string (required - JSON [x,y,z], outward normal of the wire-exit face)",
+    "pins": "string (required - JSON [{pin, point:[x,y,z], direction?:[x,y,z]}] m, part coordinates; a pin's direction overrides the top-level one)",
+    "direction": "string (required unless every pin has its own - JSON [x,y,z], outward normal of the wire-exit face)",
     "stub_length": "number (optional, default 0.005 m)",
     "replace_existing": "boolean (optional, default false - delete existing connection points and their sketches first)",
     "name_prefix": "string (optional, default 'CPoint_')",
@@ -998,7 +1022,7 @@
     "exit_depth": "number (optional, default 0.001 m)"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {document, deleted?, exit_face, face_height_mm, sketch, connection_points[{pin, point, feature, pin_id, direction, location, stub_mm, error?}], created, warnings?}; Status FAILED with code PARTIAL when a point was not created"
+  "output": "-> see execution-response.json - Features[0] = JSON {document, deleted?, exit_face (index, or [{direction, face, face_height_mm}] with several directions), face_height_mm?, sketch (name or list), connection_points[{pin, point, feature, pin_id, direction, location, stub_mm, error?}], created, warnings?}; Status FAILED with code PARTIAL (message names each failed pin and why) when a point was not created"
  },
  "import_from_to": {
   "description": "Active assembly: sets component references (IComponent2.ComponentReference), fills empty from-to header definitions (IRoutingSettings.SetFromToListHeaderDefinitions), IRouteManager.ImportFromToList, RunCommand(PmOK) for the pages it opens, finds the new route sub-assembly, optionally IAutoRoute.ConvertGuidelinesToRoute, IElectricalRoute.RouteWires, and reads the route back. Increments state_version.",
@@ -1092,13 +1116,14 @@
   "output": "-> see execution-response.json - Features[0] = JSON {drawing, pdf, route, flattened_route, configuration, sheet, scale, flat_size_mm, view_outline_mm, connectors[{reference, part, wires, flat_end_mm?, label_at_mm?}], tables[{kind, reference?, rows, columns?, at_mm}], bundle_length_notes[{segment, wires, length_mm}], wires, warnings?, note}"
  },
  "route_covering": {
-  "description": "Active assembly: lists, adds or removes coverings on the route segments of an electrical route (route component edited for the Routing API: IElectricalRoute.GetRouteProperty, IRouteProperty.CreateCovering / AddCovering / GetCovering / RemoveCovering / HasCovering, ICovering Name / PartNumber / OuterDiameter / Color set on the attached covering). Segments by id, exact wire set or minimum wire count. Whole segments only (Split Route / Fixed Length Covering are not in the API). Marks the route sub-assembly modified (SetSaveFlag) when segments change so save_document persists coverings. add / remove increment state_version; list is read-only.",
+  "description": "Active assembly: lists, adds or removes coverings on the route segments of an electrical route (route component edited for the Routing API: IElectricalRoute.GetRouteProperty, IRouteProperty.CreateCovering / AddCovering / GetCovering / RemoveCovering / HasCovering, ICovering Name / PartNumber / OuterDiameter / Color set on the attached covering). Segments by id, exact wire set or minimum wire count. Whole segments only (Split Route / Fixed Length Covering are not in the API). Marks the route sub-assembly modified (SetSaveFlag) when segments change so save_document persists coverings. export writes every covering keyed by the exact wire set of its segment to a JSON file (read-only); import puts them back on the segments with the same wire set (after a redraw renumbered the segments). add / remove / import increment state_version; list / export are read-only.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "route": "string (required - route sub-assembly instance)",
-    "action": "string (optional, default list - list | add | remove)",
+    "action": "string (optional, default list - list | add | remove | export | import)",
+    "file_path": "string (export / import: required - the JSON file {route, exported_utc, coverings[{wires, name, part_number, outer_diameter_mm, color}]}; import also takes a bare list)",
     "segments": "string (optional - JSON list of route segment ids)",
     "wires": "string (optional - JSON list of wire names: segments whose wire set equals it)",
     "min_wires": "integer (optional - segments carrying at least this many wires)",
@@ -1108,7 +1133,7 @@
     "color": "array (optional - [r, g, b])"
    }
   },
-  "output": "-> see execution-response.json - Features[0] = JSON {route, segments[{id, length_mm, wires, added?, removed?, replaced?, has_covering, covering?{name, part_number, outer_diameter_mm}}], note, steps, warnings?}"
+  "output": "-> see execution-response.json - Features[0] = JSON {route, segments[{id, length_mm, wires, added?, removed?, replaced?, has_covering, covering?{name, part_number, outer_diameter_mm, color}}] (export: no segments; file_path, exported, coverings), note, steps, warnings?; import: applied_segments, unmatched_entries[{wires, part_number}], uncovered_segments[{id, length_mm, wire_count, wires}]}"
  },
  "route_guidelines": {
   "description": "Active assembly: edits a route and converts its guidelines into route geometry (IAutoRoute.ShowGuidelines, SelectGuidelines, ConvertGuidelinesToRoute), optionally exits. Increments state_version.",

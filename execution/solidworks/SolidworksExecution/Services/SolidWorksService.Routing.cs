@@ -1270,6 +1270,17 @@ namespace SolidworksExecution.Services
                                 out join, shape, fo.Value<bool?>("concentric"), fo.Value<double?>("concentric_max_span") ?? 0.008,
                                 fo.Value<bool?>("converge"), fo.Value<double?>("throat_radius") ?? 0,
                                 fo.Value<double?>("converge_max_deg") ?? 45);
+                            // One used cavity: the join fell on the leg's last bend (the fillet removed
+                            // that vertex, so a bundle started there missed the route). Extend the leg
+                            // 3 mm straight past its last point so the bundle starts on a straight.
+                            if (ends.Count == 1 && givenJoin == null && legs.Count == 1 && legs[0].Item2.Count >= 2)
+                            {
+                                var lp = legs[0].Item2;
+                                var u = Unit(Sub(lp[lp.Count - 1], lp[lp.Count - 2]));
+                                lp[lp.Count - 1] = Add(lp[lp.Count - 1], Scale(u, 0.003));
+                                join = lp[lp.Count - 1];
+                                shape["single_cavity"] = "one used cavity: the leg runs 3 mm straight past its last bend to the join (a path from the stub end does the same)";
+                            }
                             foreach (var lg in legs)
                                 fanJobs.Add(Tuple.Create($"fan_out {cn} pin {pins[lg.Item1]}", lg.Item2, lg.Item3));
                             var rep = new JObject

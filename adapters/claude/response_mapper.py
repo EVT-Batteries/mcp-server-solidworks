@@ -10,6 +10,9 @@ import json
 from mcp.server.mcpserver.exceptions import ToolError
 
 
+FAILED_DETAILS_MAX = 4000
+
+
 class CadOperationError(ToolError, RuntimeError):
     """A FAILED execution response. A ToolError, so the MCP SDK shows its message (code and
     text) to the model; also a RuntimeError, for the adapter code that catches those."""
@@ -47,9 +50,19 @@ def map_response(response: dict) -> str:
 
     if status == "FAILED":
         error = response.get("error") or {}
-        raise CadOperationError(
+        text = (
             f"CAD operation failed | code={error.get('code')} | "
             f"message={error.get('message')}"
         )
+        # A FAILED response can still carry the tool's result payload (e.g. which items failed and
+        # why: add_connector_pins' connection_points, route_path's junctions). Pass it on, cut to
+        # FAILED_DETAILS_MAX characters, instead of dropping it.
+        details = (response.get("cadState") or {}).get("features") or []
+        if details:
+            joined = " ".join(str(d) for d in details)
+            if len(joined) > FAILED_DETAILS_MAX:
+                joined = joined[:FAILED_DETAILS_MAX] + f" ... [{len(joined) - FAILED_DETAILS_MAX} more characters]"
+            text += f" | details={joined}"
+        raise CadOperationError(text)
 
     raise CadOperationError(f"Unknown execution response status: {status}")

@@ -201,7 +201,19 @@ Results are in `$r.cadState.features` (often one JSON string).
 - **File paths**: `AddComponent5` returned null for a forward-slash path (`C:/dir/part.sldprt`)
   of a part that was not loaded; normalize with `Path.GetFullPath`.
 - **Screenshots**: `IModelDoc2.SaveBMP(path, w, h)` captures the document window (it must be
-  visible: activate it first); it never writes the document.
+  visible: activate it first); it never writes the document. The named views
+  (`ShowNamedView2`) are Y-up: a Z-up model lies on its side in 'isometric', which reads as "the
+  zoom framed the wrong area" when it did not (2026-11-23). `screenshot(up='z')` replaces the
+  view rotation R by M·R (`IModelView.Orientation3`, settable; built with
+  `IMathUtility.CreateTransform` from the 16-number array) with M taking (x, y, z) to
+  (x, z, -y). A caption argument often arrives with a typed backslash-n: it is split there too.
+- **Adapter-side tools and parameters** (2026-11-23): `start_job` / `job_status` (a tool run in
+  an adapter thread, every HTTP wait `JOB_HTTP_TIMEOUT` through a context variable read by
+  `_timeout_for`) and `routing_status(csv_path, compare_to, csv_note)` (the wire table written
+  from `_call_raw`) never reach the execution server as such; `tool-schemas.json` lists them
+  marked ADAPTER-SIDE so the contract test still covers them. Tests without SolidWorks:
+  `tests/test_adapter_helpers.py`. A FAILED response's `cadState.features` (the per-item
+  reasons) is appended to the error text, cut to `FAILED_DETAILS_MAX`.
 - **Routing (SOLIDWORKS Routing add-in, `Services/SolidWorksService.Routing.cs`)**: interop
   `SolidWorks.Interop.SWRoutingLib` is referenced with `EmbedInteropTypes=True` (no extra DLL in
   `bin/Debug`); use its interfaces (`IRouteManager`, `IElectricalRoute`, `IWire`, `IAutoRoute`,
@@ -228,6 +240,15 @@ Results are in `$r.cadState.features` (often one JSON string).
     matches the list's From/To Ref and no component library is needed.
   - `InsertConnectionPoint` needs the exit face (mark 1) and a sketch point (mark 1);
     `InsertRoutePoint` with only a sketch point selected creates nothing (opens its dialog).
+    Without the Routing add-in loaded `InsertConnectionPoint` returns false and creates nothing,
+    with no error (2026-11-23: looked like a geometry problem; the add-in had not loaded in a new
+    SolidWorks session): `add_connector_pins` checks `GetAddInObject(Routing CLSID)` first and
+    fails with `ROUTING_NOT_LOADED`. A point on an annular end face (the centre in the hole) works
+    once the add-in is loaded.
+  - A one-pin `fan_out` (2026-11-23): `SmoothFanLegs` put the join on the leg's last bend, whose
+    vertex the fillet removes, so a bundle started there failed `END_NOT_ON_ROUTE`; a single used
+    cavity now gets its leg extended 3 mm straight past the last point (`single_cavity` in the
+    fan report).
   - `IWire.GetRouteErrors` reports `violates_bend_radius` against the wire library's
     `MinBendRadius`, for the innermost wire of the bundle: an arc of exactly the minimum radius
     is flagged (2026-11-12). Sharp corners where bundles meet at a breakout or a stub end are not:

@@ -409,11 +409,14 @@ namespace SolidworksExecution.Services
                 if (!(doc is IPartDoc))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "WRONG_DOCUMENT_TYPE", "add_connector_pins needs an active part (open the connector part).");
-                var dir = ParseVec(p?["direction"]);
-                if (dir == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "INVALID_PARAMETER", "direction must be [x, y, z]: the outward normal of the wire-exit face (part coordinates).");
-                dir = Unit(dir);
+                // InsertConnectionPoint creates nothing (no error) without the Routing add-in.
+                object routingAddin = null;
+                try { routingAddin = _solidWorks.GetAddInObject(RoutingAddinClsid); } catch { }
+                if (routingAddin == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "ROUTING_NOT_LOADED",
+                        "The SOLIDWORKS Routing add-in is not loaded (Tools > Add-Ins > SOLIDWORKS Routing): connection points cannot be created without it.");
+                var defaultDir = ParseVec(p?["direction"]);
+                if (defaultDir != null) defaultDir = Unit(defaultDir);
                 JArray pins;
                 try
                 {
@@ -427,14 +430,21 @@ namespace SolidworksExecution.Services
                 if (pins == null || pins.Count == 0)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "INVALID_PARAMETER", "pins must be a JSON list of {\"pin\": \"1\", \"point\": [x, y, z]} (part coordinates, m), e.g. connector_cavities(numbering=...).pins.");
-                var wanted = new List<(string pin, double[] pt)>();
+                // Each pin may carry its own direction (a part with wire exits on several faces, e.g. a
+                // splice with one end each way); the others take the top-level direction.
+                var wanted = new List<(string pin, double[] pt, double[] dir)>();
                 foreach (var t in pins)
                 {
                     string pin = t?.Value<string>("pin");
                     var pt = ParseVec(t?["point"]);
                     if (string.IsNullOrWhiteSpace(pin) || pt == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", "every pins entry needs pin and point [x, y, z]: " + t?.ToString(Newtonsoft.Json.Formatting.None));
-                    wanted.Add((pin.Trim(), pt));
+                    var pd = ParseVec(t?["direction"]);
+                    pd = pd != null ? Unit(pd) : defaultDir;
+                    if (pd == null)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER",
+                            $"pin {pin}: no direction. Give direction [x, y, z] (the outward normal of the wire-exit face, part coordinates) for all pins, or per pin in its entry.");
+                    wanted.Add((pin.Trim(), pt, pd));
                 }
                 if (wanted.Select(w => w.pin).Distinct(StringComparer.OrdinalIgnoreCase).Count() != wanted.Count)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", "pin numbers must be unique.");
@@ -497,32 +507,46 @@ namespace SolidworksExecution.Services
                     result["deleted"] = deleted;
                 }
 
+                // One pass per exit direction (pins sharing a direction share an exit face and a sketch).
+                var groups = wanted.GroupBy(w => string.Join(",", w.dir.Select(v => Math.Round(v, 4)))).ToList();
+                if (faceIndex >= 0 && groups.Count > 1)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER",
+                        "face_index applies to one exit direction: leave it out when the pins have several directions.");
+                var selMgr = doc.SelectionManager as ISelectionMgr;
+                var made = new JArray();
+                var exitFaces = new JArray();
+                var sketchNames = new JArray();
+                int gi = 0;
+                foreach (var grp in groups)
+                {
+                var dir = grp.First().dir;
+                gi++;
                 // 2. The exit face: given, or the largest outermost face along direction.
                 double faceH;
-                if (faceIndex < 0)
+                int groupFace = faceIndex;
+                if (groupFace < 0)
                 {
                     var faces = ExitFaces(doc, dir, depth);
                     if (faces.Count == 0)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "FACE_NOT_FOUND",
-                            "No planar face has its outward normal along direction: check direction (part coordinates) or give face_index.");
+                            $"No planar face has its outward normal along direction {J3(dir, 4)} (pins {string.Join(", ", grp.Select(w => w.pin))}): check direction (part coordinates) or give face_index.");
                     var best = faces.OrderByDescending(f => f.face.GetArea()).First();
-                    faceIndex = best.i;
+                    groupFace = best.i;
                     faceH = best.h;
                 }
                 else
                 {
                     var all = ExitFaces(doc, dir, 1.0);
-                    var hit = all.FirstOrDefault(f => f.i == faceIndex);
+                    var hit = all.FirstOrDefault(f => f.i == groupFace);
                     if (hit.face == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER",
-                            $"face_index {faceIndex} is not a planar face with its normal along direction.");
+                            $"face_index {groupFace} is not a planar face with its normal along direction.");
                     faceH = hit.h;
                 }
-                result["exit_face"] = faceIndex;
-                result["face_height_mm"] = Math.Round(faceH * 1000, 3);
+                exitFaces.Add(new JObject { ["direction"] = J3(dir, 6), ["face"] = groupFace, ["face_height_mm"] = Math.Round(faceH * 1000, 3) });
 
-                // 3. One 3D sketch with every pin point, on the exit face plane.
-                var onFace = wanted.Select(w => (w.pin, pt: Add(w.pt, Scale(dir, faceH - Dot(w.pt, dir))), off: faceH - Dot(w.pt, dir))).ToList();
+                // 3. One 3D sketch with this group's pin points, on its exit face plane.
+                var onFace = grp.Select(w => (w.pin, pt: Add(w.pt, Scale(dir, faceH - Dot(w.pt, dir))), off: faceH - Dot(w.pt, dir))).ToList();
                 foreach (var w in onFace)
                     if (Math.Abs(w.off) > 0.0002) warnings.Add($"pin {w.pin}: point moved {Math.Round(w.off * 1000, 3)} mm along direction onto the exit face");
                 var sm = doc.SketchManager;
@@ -537,13 +561,12 @@ namespace SolidworksExecution.Services
                 var sk = sketchFeat?.GetSpecificFeature2() as ISketch;
                 if (sk == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "SKETCH_FAILED", "Could not create the 3D sketch of the pin points.");
-                try { sketchFeat.Name = prefix + "Pins_Sketch"; } catch { }
-                result["sketch"] = sketchFeat.Name;
+                try { sketchFeat.Name = prefix + "Pins_Sketch" + (groups.Count > 1 ? gi.ToString() : ""); } catch { }
+                sketchNames.Add(sketchFeat.Name);
                 var skPts = (sk.GetSketchPoints2() as object[] ?? new object[0]).OfType<ISketchPoint>().ToList();
+                int faceIndexForPins = groupFace;
 
                 // 4. A connection point per pin, then its pin number (ElectricalPinID).
-                var selMgr = doc.SelectionManager as ISelectionMgr;
-                var made = new JArray();
                 foreach (var w in onFace)
                 {
                     var spt = skPts.OrderBy(s => { var d = Sub(new[] { s.X, s.Y, s.Z }, w.pt); return Dot(d, d); }).FirstOrDefault();
@@ -553,7 +576,7 @@ namespace SolidworksExecution.Services
                     foreach (bool reverse in new[] { false, true })
                     {
                         doc.ClearSelection2(true);
-                        if (!SelectFaceByIndexAppend(doc, faceIndex, 1)) { pj["error"] = $"face {faceIndex} not selectable"; break; }
+                        if (!SelectFaceByIndexAppend(doc, faceIndexForPins, 1)) { pj["error"] = $"face {faceIndexForPins} not selectable"; break; }
                         var sd = selMgr.CreateSelectData();
                         sd.Mark = 1;
                         spt.Select4(true, sd);
@@ -596,6 +619,10 @@ namespace SolidworksExecution.Services
                     made.Add(pj);
                 }
                 doc.ClearSelection2(true);
+                }   // direction groups
+                result["exit_face"] = exitFaces.Count == 1 ? exitFaces[0]["face"] : exitFaces;
+                if (exitFaces.Count == 1) result["face_height_mm"] = exitFaces[0]["face_height_mm"];
+                result["sketch"] = sketchNames.Count == 1 ? sketchNames[0] : sketchNames;
 
                 // 5. Routing component type: connector, electrical.
                 try
@@ -628,7 +655,8 @@ namespace SolidworksExecution.Services
                         Features = new List<string> { result.ToString(Newtonsoft.Json.Formatting.None) },
                         Dimensions = new List<string>()
                     },
-                    Error = success ? null : new ExecutionError { Code = "PARTIAL", Message = "Some connection points were not created: see connection_points." }
+                    Error = success ? null : new ExecutionError { Code = "PARTIAL", Message = "Some connection points were not created: " +
+                        string.Join("; ", made.Where(m => m["feature"] == null).Select(m => $"pin {m["pin"]}: {m["error"]}")) }
                 };
                 _guard.RegisterCompleted(request.OperationId, response);
                 return response;

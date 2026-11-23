@@ -1,9 +1,14 @@
+import contextvars
+import csv
 import functools
 import hashlib
 import inspect
+import io
 import json
 import os
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
@@ -63,6 +68,8 @@ mcp = MCPServer(
 # <name>" with the reason only in the server log. Every tool is therefore registered through this
 # wrapper, which turns whatever it raises into a ToolError carrying the exception's type and text.
 _register_tool = mcp.tool
+# Every registered tool by name (start_job runs them in the background).
+_TOOL_FUNCS: dict = {}
 
 
 def _tool_with_errors(*dargs, **dkwargs):
@@ -81,9 +88,23 @@ def _tool_with_errors(*dargs, **dkwargs):
                     text = f"{type(exc).__name__}: {text}"
                 raise ToolError(text) from exc
 
+        _TOOL_FUNCS[fn.__name__] = wrapper
         return register(wrapper)
 
     return decorate
+
+
+class _JobTools:
+    """The tools start_job may run: every registered tool except the job tools themselves."""
+
+    def get(self, name: str):
+        return None if name in ("start_job", "job_status") else _TOOL_FUNCS.get(name)
+
+    def __iter__(self):
+        return (n for n in _TOOL_FUNCS if n not in ("start_job", "job_status"))
+
+
+_JOB_TOOLS = _JobTools()
 
 
 mcp.tool = _tool_with_errors
@@ -101,7 +122,19 @@ LONG_TOOLS = {
 
 
 def _timeout_for(tool_name: str) -> float | None:
+    job_timeout = _JOB_TIMEOUT.get()
+    if job_timeout is not None:
+        return job_timeout
     return LONG_HTTP_TIMEOUT if tool_name in LONG_TOOLS else None
+
+
+# Background jobs (start_job / job_status): a tool call run in a thread of the adapter, so a call
+# that takes longer than LONG_HTTP_TIMEOUT (a route draw on a large assembly: 15-25 min) neither
+# times out nor blocks the conversation. Inside a job every HTTP wait is JOB_HTTP_TIMEOUT.
+JOB_HTTP_TIMEOUT = float(os.getenv("JOB_HTTP_TIMEOUT", "14400"))
+_JOB_TIMEOUT: contextvars.ContextVar = contextvars.ContextVar("solidpilot_job_timeout", default=None)
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
 
 
 # Tracks state_version in memory. Starts at 0, updated after every response.
@@ -183,6 +216,85 @@ def ensure_ready() -> str:
         + (f" | WARNING {body['instanceWarning']}" if body.get('instanceWarning') else "")
         + (f" | {body['attachNote']}" if body.get('attachNote') else "")
     )
+
+
+# ---------------------------------------------------------------------------
+# Tools: start_job / job_status  (adapter-side background calls)
+# ---------------------------------------------------------------------------
+def _run_job(job_id: str, fn, kwargs: dict) -> None:
+    _JOB_TIMEOUT.set(JOB_HTTP_TIMEOUT)
+    job = _jobs[job_id]
+    try:
+        job["result"] = fn(**kwargs)
+        job["status"] = "done"
+    except Exception as exc:  # noqa: BLE001 - reported through job_status
+        job["error"] = str(exc) or repr(exc)
+        job["status"] = "failed"
+    job["finished"] = time.time()
+
+
+@mcp.tool(structured_output=False)
+def start_job(tool: str, args: str = "{}") -> str:
+    """Run another SolidPilot tool in the background and return at once with a job id; read its
+    result with job_status. For calls that run longer than the normal wait (LONG_HTTP_TIMEOUT,
+    default 900 s), e.g. import_from_to + route_path on a large assembly, or when other work can
+    go on meanwhile. Inside the job the HTTP wait is JOB_HTTP_TIMEOUT (default 4 h).
+    tool: the tool's name (e.g. 'route_path'); args: JSON object of its arguments, exactly as the
+        tool takes them (strings stay strings: '{"route": "...", "paths": "[...]"}').
+    SolidWorks runs one call at a time: while a job runs, other calls that need SolidWorks fail
+    with SOLIDWORKS_BUSY after 20 s (read-only adapter tools such as job_status still answer).
+    Jobs live in this adapter process: an MCP restart loses them (the SolidWorks call itself
+    goes on)."""
+    fn = _JOB_TOOLS.get(tool)
+    if fn is None:
+        raise ToolError(f"start_job: unknown tool '{tool}'. Tools: {', '.join(sorted(_JOB_TOOLS))}")
+    try:
+        kwargs = json.loads(args or "{}")
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"start_job: args is not a JSON object: {exc}") from exc
+    if not isinstance(kwargs, dict):
+        raise ToolError("start_job: args must be a JSON object of the tool's arguments.")
+    try:
+        inspect.signature(fn).bind(**kwargs)
+    except TypeError as exc:
+        raise ToolError(f"start_job: {tool}{inspect.signature(fn)}: {exc}") from exc
+    job_id = uuid.uuid4().hex[:8]
+    with _jobs_lock:
+        running = [j for j, v in _jobs.items() if v["status"] == "running"]
+        _jobs[job_id] = {"tool": tool, "status": "running", "started": time.time(),
+                         "finished": None, "result": None, "error": None}
+    threading.Thread(target=_run_job, args=(job_id, fn, kwargs), daemon=True,
+                     name=f"solidpilot-job-{job_id}").start()
+    note = f" | WARNING jobs still running: {', '.join(running)} (SolidWorks takes one call at a time)" if running else ""
+    return f"STARTED | job_id={job_id} | tool={tool}{note}"
+
+
+@mcp.tool(structured_output=False)
+def job_status(job_id: str = "", wait_s: Annotated[float, Field(ge=0, le=600)] = 0.0) -> str:
+    """Status of a background job from start_job (adapter-side, never calls SolidWorks).
+    job_id: the job; empty = list every job of this adapter (id, tool, status, elapsed).
+    wait_s: wait up to this many seconds for the job to finish before answering (0 = answer now).
+    Returns RUNNING with the elapsed time, or DONE with the tool's own result text, or FAILED
+    with its error."""
+    if not job_id:
+        if not _jobs:
+            return "NO JOBS"
+        now = time.time()
+        return "\n".join(
+            f"{j} | {v['tool']} | {v['status'].upper()} | {round((v['finished'] or now) - v['started'])} s"
+            for j, v in _jobs.items())
+    job = _jobs.get(job_id)
+    if job is None:
+        raise ToolError(f"job_status: no job '{job_id}' (jobs: {', '.join(_jobs) or 'none'}).")
+    deadline = time.time() + wait_s
+    while job["status"] == "running" and time.time() < deadline:
+        time.sleep(min(1.0, max(0.0, deadline - time.time())))
+    elapsed = round((job["finished"] or time.time()) - job["started"])
+    if job["status"] == "running":
+        return f"RUNNING | job_id={job_id} | tool={job['tool']} | elapsed={elapsed} s"
+    if job["status"] == "failed":
+        raise ToolError(f"FAILED | job_id={job_id} | tool={job['tool']} | elapsed={elapsed} s | {job['error']}")
+    return f"DONE | job_id={job_id} | tool={job['tool']} | elapsed={elapsed} s | {job['result']}"
 
 
 # ---------------------------------------------------------------------------
@@ -1539,7 +1651,8 @@ def sweep_circular(
 @mcp.tool(structured_output=False)
 def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
                    terminations: str = "",
-                   max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0) -> str:
+                   max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0,
+                   csv_path: str = "", compare_to: str = "", csv_note: str = "") -> str:
     """Read SOLIDWORKS Routing state (read-only, does NOT change state_version).
     Always: whether the Routing add-in is loaded and its cable / component library files;
     verbose=True: every library file location and the from-to header definitions (an EMPTY one
@@ -1567,7 +1680,13 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         the route end at the connection point (housing rear face -> conductor end in the crimp).
         Each wire then gets termination {from, to} (the matching entries, extra keys kept) and
         total_cut_length_mm = cut_length_mm + both allowances: the length to cut, strip
-        included. Wires with an end lacking an entry: terminations_missing."""
+        included. Wires with an end lacking an entry: terminations_missing.
+    csv_path (with route): also write the wire table to this CSV (UTF-8): Wire, From, To, Spec,
+        CutLength_mm, MinArcRadius_mm, MaxKink_deg, Errors (+ TotalCutLength_mm with
+        terminations), one row per wire in wire-number order, csv_note as a '# ' first line.
+    compare_to: an earlier CSV of the same table (e.g. the file being replaced: it is read
+        before it is overwritten): adds Previous_mm and Delta_mm per wire (its CutLength_mm), and
+        the result reports the wires that changed by more than 1 mm."""
     params = {"route": route, "verbose": verbose}
     if max_kink_deg != 15.0:
         params["max_kink_deg"] = max_kink_deg
@@ -1575,7 +1694,75 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         params["connectors"] = connectors
     if terminations.strip():
         params["terminations"] = terminations
-    return _call("routing_status", params)
+    if not csv_path.strip():
+        return _call("routing_status", params)
+    if not route.strip():
+        raise ToolError("routing_status: csv_path needs route (the route sub-assembly whose wires to write).")
+    previous = _read_wire_csv(compare_to) if compare_to.strip() else {}
+    raw = _call_raw("routing_status", params)
+    text = map_response(raw)   # raises on FAILED
+    features = (raw.get("cadState") or {}).get("features") or []
+    try:
+        wires = (json.loads(features[0]).get("route") or {}).get("wires") or []
+    except (IndexError, ValueError, AttributeError) as exc:
+        raise ToolError(f"routing_status: no wire table in the result to write ({exc}).") from exc
+    rows, changed = _write_wire_csv(csv_path, wires, previous, csv_note)
+    text += f" | csv={csv_path} rows={rows}"
+    if compare_to.strip():
+        text += f" | changed_over_1mm={len(changed)}: {', '.join(changed)}"
+    return text
+
+
+def _wire_sort_key(name: str):
+    digits = "".join(ch for ch in name if ch.isdigit())
+    return (name.rstrip("0123456789"), int(digits) if digits else 0, name)
+
+
+def _read_wire_csv(path: str) -> dict:
+    """{wire: CutLength_mm} from a wire table CSV ('#' lines skipped, columns by header name)."""
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        lines = [ln for ln in fh if not ln.startswith("#")]
+    out = {}
+    for row in csv.DictReader(lines):
+        try:
+            out[row["Wire"]] = float(row["CutLength_mm"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _write_wire_csv(path: str, wires: list, previous: dict, note: str) -> tuple:
+    with_total = any(w.get("total_cut_length_mm") is not None for w in wires)
+    header = ["Wire", "From", "To", "Spec", "CutLength_mm", "MinArcRadius_mm", "MaxKink_deg", "Errors"]
+    if with_total:
+        header.append("TotalCutLength_mm")
+    if previous:
+        header += ["Previous_mm", "Delta_mm"]
+    buf = io.StringIO()
+    if note.strip():
+        buf.write("# " + note.strip().replace("\n", " ") + "\n")
+    wr = csv.writer(buf, lineterminator="\n")
+    wr.writerow(header)
+    changed = []
+    for w in sorted(wires, key=lambda x: _wire_sort_key(str(x.get("name", "")))):
+        cut = float(w.get("cut_length_mm") or 0)
+        row = [w.get("name", ""), w.get("from", ""), w.get("to", ""), w.get("wire_name", ""),
+               f"{cut:.2f}", f"{float(w.get('min_arc_radius_mm') or 0):.2f}",
+               f"{float(w.get('max_kink_deg') or 0):.1f}", ";".join(w.get("errors") or [])]
+        if with_total:
+            t = w.get("total_cut_length_mm")
+            row.append("" if t is None else f"{float(t):.2f}")
+        if previous:
+            p = previous.get(w.get("name", ""))
+            row += ["", ""] if p is None else [f"{p:.2f}", f"{cut - p:+.2f}"]
+            if p is None or abs(cut - p) > 1.0:
+                changed.append(str(w.get("name", "")))
+        wr.writerow(row)
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(buf.getvalue())
+    return len(wires), changed
 
 
 @mcp.tool(structured_output=False)
@@ -1672,7 +1859,7 @@ def connector_cavities(
 @mcp.tool(structured_output=False)
 def add_connector_pins(
     pins: str,
-    direction: str,
+    direction: str = "",
     stub_length: Annotated[float, Field(ge=0)] = 0.005,
     replace_existing: bool = False,
     name_prefix: str = "CPoint_",
@@ -1684,10 +1871,15 @@ def add_connector_pins(
     carrying its pin number (ConnectionPointFeatureData.ElectricalPinID). A from-to import then
     attaches every wire to its own cavity (wires fan out from the cavities, and the wire-to-pin
     match is checked) instead of all wires sharing one point. Bumps state_version.
-    pins: JSON [{"pin": "1", "point": [x, y, z]}, ...] in METERS, part coordinates (the `pins`
-        of connector_cavities); points are moved onto the exit face plane along direction.
+    pins: JSON [{"pin": "1", "point": [x, y, z], "direction"?: [x, y, z]}, ...] in METERS, part
+        coordinates (the `pins` of connector_cavities); points are moved onto the exit face plane
+        along their direction. A pin's own direction overrides the top-level one: a part with
+        wire exits on several faces (a splice with one end each way) takes one call, one exit
+        face and point sketch per direction.
     direction: JSON [x, y, z], outward normal of the wire-exit face (the route leaves along it;
-        a point created the other way is recreated reversed).
+        a point created the other way is recreated reversed); needed unless every pin has one.
+    Needs the SOLIDWORKS Routing add-in loaded (fails with ROUTING_NOT_LOADED otherwise:
+    without it SOLIDWORKS creates no connection point and gives no error).
     stub_length (m): straight wire out of each cavity before the route (default 5 mm).
     replace_existing: delete the part's connection points first (and the point sketches only
         they used). Without it, a part that already has a point without a pin, or with one of
@@ -1695,10 +1887,12 @@ def add_connector_pins(
     Also sets the part's Routing component type to connector (electrical). Save the part after.
     Returns connection_points (pin, feature, pin_id read back, location, direction, stub_mm),
     the exit face, deleted features and warnings."""
-    return _call("add_connector_pins", {
-        "pins": pins, "direction": direction, "stub_length": stub_length,
-        "replace_existing": replace_existing, "name_prefix": name_prefix,
-        "face_index": face_index, "exit_depth": exit_depth})
+    params = {"pins": pins, "stub_length": stub_length,
+              "replace_existing": replace_existing, "name_prefix": name_prefix,
+              "face_index": face_index, "exit_depth": exit_depth}
+    if direction.strip():
+        params["direction"] = direction
+    return _call("add_connector_pins", params)
 
 
 @mcp.tool(structured_output=False)
@@ -2024,7 +2218,7 @@ def route_drawing(
 @mcp.tool(structured_output=False)
 def route_covering(
     route: str,
-    action: Literal["list", "add", "remove"] = "list",
+    action: Literal["list", "add", "remove", "export", "import"] = "list",
     segments: str = "",
     wires: str = "",
     min_wires: Annotated[int, Field(ge=0)] = 0,
@@ -2032,6 +2226,7 @@ def route_covering(
     part_number: str = "",
     outer_diameter: Annotated[float, Field(ge=0)] = 0.0,
     color: str = "",
+    file_path: str = "",
 ) -> str:
     """Coverings (sleeving, tape, conduit) on the route segments of an electrical route in the
     ACTIVE assembly (IRouteProperty.CreateCovering / AddCovering, ICovering). Bumps state_version
@@ -2048,9 +2243,18 @@ def route_covering(
     part of a segment (a manufacturer's free zone at a housing) needs SOLIDWORKS' Split Route or
     Fixed Length Covering first, which the Routing API does not offer: do that in the GUI.
     Marks the route sub-assembly modified (SetSaveFlag) when segments change so save_document
-    persists the coverings."""
+    persists the coverings.
+    Redrawing a route (import_from_to replaces=...) drops its coverings and renumbers its
+    segments: 'export' first writes every covering, keyed by the exact wire set of its segment,
+    to file_path (JSON {coverings: [{wires, name, part_number, outer_diameter_mm, color}]};
+    read-only); after the redraw, 'import' (file_path) puts each covering back on every segment
+    with the same wire set and reports applied_segments, unmatched_entries (wire sets the new
+    route no longer has) and uncovered_segments (2+ wires, no covering: new wire sets to cover
+    with 'add')."""
     params = {"route": route, "action": action, "min_wires": min_wires, "name": name,
               "part_number": part_number, "outer_diameter": outer_diameter}
+    if file_path.strip():
+        params["file_path"] = file_path
     if segments.strip():
         params["segments"] = segments
     if wires.strip():
@@ -2101,16 +2305,20 @@ def screenshot(
     isolate: bool = False,
     margin: Annotated[float, Field(ge=0, le=2)] = 0.1,
     hide_sketches: bool | None = None,
+    up: Literal["y", "z"] = "y",
 ) -> str:
     """Save the active document's graphics view as a PNG image (does NOT change state).
     Captures what the SolidWorks window shows (IModelDoc2.SaveBMP); the document file itself is
     never written. Only the on-screen view changes: `view` switches to a standard orientation
-    first ('current' keeps the user's view; standard views are SolidWorks' Y-up ones, so a Z-up
-    model is seen from above with 'front'), and zoom_to_fit fits the model in the window.
+    first ('current' keeps the user's view), and zoom_to_fit fits the model in the window.
+    up: 'y' = SolidWorks' standard views (Y up: a Z-up model is seen from above with 'front' and
+        lies on its side in 'isometric'); 'z' = the same views for a Z-up model (Z up, 'front'
+        looks along +Y).
     file_path: full output path ending in .png (folders are created).
     width / height: image size in pixels; 0 = the window's size.
-    caption: optional text drawn in a white band under the image, one line per '\\n'; the first
-        line is bold (e.g. the part name, then its measurements from measure_curves).
+    caption: optional text drawn in a white band under the image, one line per line break (a
+        typed backslash-n works too); the first line is bold (e.g. the part name, then its
+        measurements from measure_curves).
     zoom_box: JSON '[x1, y1, z1, x2, y2, z2]' in METERS, model coordinates: zoom on that 3D box
         (projected into the chosen view, plus `margin` x its size on each side) instead of fitting
         the whole model, e.g. to look at one connector area of a large assembly. The view is
@@ -2126,6 +2334,8 @@ def screenshot(
     The document's window must be visible: activate_document it first."""
     params: dict = {"file_path": file_path, "view": view, "zoom_to_fit": zoom_to_fit,
                     "width": width, "height": height, "caption": caption}
+    if up == "z":
+        params["up"] = "z"
     if zoom_box:
         params["zoom_box"] = json.loads(zoom_box)
     if focus and focus.strip() != "[]":

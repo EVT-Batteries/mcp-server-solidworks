@@ -32,9 +32,38 @@ namespace SolidworksExecution.Services
                 var p = request.Params as JObject;
                 string routeName = p?.Value<string>("route") ?? "";
                 string action = (p?.Value<string>("action") ?? "list").ToLowerInvariant();
-                if (action != "list" && action != "add" && action != "remove")
+                if (action != "list" && action != "add" && action != "remove" && action != "export" && action != "import")
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "INVALID_PARAMETER", "action must be list, add or remove.");
+                        "INVALID_PARAMETER", "action must be list, add, remove, export or import.");
+                // export / import: the coverings keyed by the exact wire set of their segments, so a
+                // route that was redrawn (new segment ids) gets them back where the wire sets agree.
+                string filePath = p?.Value<string>("file_path") ?? "";
+                if ((action == "export" || action == "import") && string.IsNullOrWhiteSpace(filePath))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "INVALID_PARAMETER", action + " needs file_path (a .json file).");
+                var imported = new Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
+                if (action == "import")
+                {
+                    JArray entries;
+                    try
+                    {
+                        var root = JToken.Parse(System.IO.File.ReadAllText(filePath));
+                        entries = root is JArray ra ? ra : (root["coverings"] as JArray ?? new JArray());
+                    }
+                    catch (Exception ex)
+                    {
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER", "file_path: " + ex.Message);
+                    }
+                    foreach (var e in entries.OfType<JObject>())
+                    {
+                        var ws = (e["wires"] as JArray)?.Select(t => (string)t).ToList();
+                        if (ws == null || ws.Count == 0) continue;
+                        imported[WireSetKey(ws)] = e;
+                    }
+                    if (imported.Count == 0)
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER",
+                            "file_path holds no covering entries ({wires: [...], name, part_number, outer_diameter_mm, color?}).");
+                }
                 var doc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = doc as IAssemblyDoc;
                 if (asm == null)
@@ -60,7 +89,7 @@ namespace SolidworksExecution.Services
                 if (wantIds != null && wantIds.Count == 0) wantIds = null;
                 if (wantWires != null && wantWires.Count == 0) wantWires = null;
                 int minWires = p?.Value<int?>("min_wires") ?? 0;
-                if (action != "list" && wantIds == null && wantWires == null && minWires <= 0)
+                if ((action == "add" || action == "remove") && wantIds == null && wantWires == null && minWires <= 0)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "INVALID_PARAMETER",
                         "Choose the segments: segments (ids), wires (the exact wire set of the segments) or min_wires.");
                 double od = p?.Value<double?>("outer_diameter") ?? 0;
@@ -76,6 +105,9 @@ namespace SolidworksExecution.Services
                 var steps = new JArray();
                 var warnings = new JArray();
                 var segOut = new JArray();
+                var exported = new Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
+                var usedImports = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var uncovered = new JArray();
                 int changed = 0;
                 doc.ClearSelection2(true);
                 routeComp.Select4(false, null, false);
@@ -107,10 +139,13 @@ namespace SolidworksExecution.Services
                     {
                         wiresOf.TryGetValue(id, out var wset);
                         wset = wset ?? new SortedSet<string>();
+                        string key = WireSetKey(wset);
+                        JObject imp = null;
+                        if (action == "import") imported.TryGetValue(key, out imp);
                         bool pick = (wantIds != null && wantIds.Contains(id))
                             || (wantWires != null && wset.SetEquals(wantWires))
                             || (minWires > 0 && wset.Count >= minWires);
-                        if (action != "list" && !pick) continue;
+                        if ((action == "add" || action == "remove") && !pick) continue;
                         var rp = er.GetRouteProperty(id) as IRouteProperty;
                         double len = 0;
                         if (er.GetSketchSegments(id) is object[] ss)
@@ -131,51 +166,75 @@ namespace SolidworksExecution.Services
                         }
                         else if (action == "add")
                         {
-                            if (rp.HasCovering) { try { rp.RemoveCovering(); sj["replaced"] = true; } catch { } }
-                            var cov = rp.CreateCovering() as Covering;
-                            if (cov == null) { sj["error"] = "CreateCovering returned nothing"; segOut.Add(sj); continue; }
-                            var ic = (ICovering)cov;
-                            if (!string.IsNullOrEmpty(name)) ic.Name = name;
-                            if (!string.IsNullOrEmpty(pn)) ic.PartNumber = pn;
-                            ic.OuterDiameter = od;
-                            if (color.HasValue) ic.Color = color.Value;
-                            bool ok = rp.AddCovering(cov);
-                            // The added covering is a copy: set its properties on the attached one
-                            // (as the API's Edit Coverings example does); OuterDiameter set before
-                            // AddCovering read back 0.
-                            if (ok && rp.GetCovering() is ICovering att)
-                            {
-                                if (!string.IsNullOrEmpty(name)) att.Name = name;
-                                if (!string.IsNullOrEmpty(pn)) att.PartNumber = pn;
-                                att.OuterDiameter = od;
-                                if (color.HasValue) att.Color = color.Value;
-                            }
+                            bool ok = AddCoveringTo(rp, sj, name, pn, od, color);
                             sj["added"] = ok;
                             if (ok) changed++;
                         }
+                        else if (action == "import" && imp != null)
+                        {
+                            int? ic = null;
+                            if (imp["color"] is JArray ica && ica.Count == 3) ic = (int)ica[0] | ((int)ica[1] << 8) | ((int)ica[2] << 16);
+                            else if (imp["color"] != null && imp["color"].Type == JTokenType.Integer) ic = (int)imp["color"];
+                            bool ok = AddCoveringTo(rp, sj, imp.Value<string>("name") ?? "", imp.Value<string>("part_number") ?? "",
+                                (imp.Value<double?>("outer_diameter_mm") ?? 0) / 1000.0, ic);
+                            sj["added"] = ok;
+                            if (ok) { changed++; usedImports.Add(key); }
+                        }
+                        bool covered = false;
                         try
                         {
-                            sj["has_covering"] = rp.HasCovering;
-                            if (rp.HasCovering && rp.GetCovering() is ICovering c)
-                                sj["covering"] = new JObject
+                            covered = rp.HasCovering;
+                            sj["has_covering"] = covered;
+                            if (covered && rp.GetCovering() is ICovering c)
+                            {
+                                var cj = new JObject
                                 {
                                     ["name"] = SafeStr(() => c.Name),
                                     ["part_number"] = SafeStr(() => c.PartNumber),
                                     ["outer_diameter_mm"] = Math.Round(c.OuterDiameter * 1000, 3),
                                 };
+                                try { int cc = c.Color; cj["color"] = new JArray(cc & 255, (cc >> 8) & 255, (cc >> 16) & 255); } catch { }
+                                sj["covering"] = cj;
+                                if (action == "export" && wset.Count > 0 && !exported.ContainsKey(key))
+                                {
+                                    var ej = (JObject)cj.DeepClone();
+                                    ej.AddFirst(new JProperty("wires", new JArray(wset)));
+                                    exported[key] = ej;
+                                }
+                            }
                         }
                         catch { }
+                        if (action == "import")
+                        {
+                            if (!covered && wset.Count >= 2)
+                                uncovered.Add(new JObject { ["id"] = id, ["length_mm"] = sj["length_mm"], ["wire_count"] = wset.Count, ["wires"] = new JArray(wset) });
+                            if (imp == null) continue;
+                        }
+                        if (action == "export") continue;
                         segOut.Add(sj);
                     }
-                    steps.Add($"{action}: {segOut.Count} segment(s) listed, {changed} changed");
-                    if (action != "list" && segOut.Count == 0) warnings.Add("no segment matched the selection");
+                    if (action == "export")
+                    {
+                        var doc0 = new JObject
+                        {
+                            ["route"] = ComponentPath(routeComp),
+                            ["exported_utc"] = DateTime.UtcNow.ToString("s") + "Z",
+                            ["coverings"] = new JArray(exported.Values),
+                        };
+                        var dirName = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(filePath));
+                        if (!string.IsNullOrEmpty(dirName)) System.IO.Directory.CreateDirectory(dirName);
+                        System.IO.File.WriteAllText(filePath, doc0.ToString(Newtonsoft.Json.Formatting.Indented));
+                        steps.Add($"export: {exported.Count} covering(s) by wire set written to {filePath}");
+                    }
+                    else steps.Add($"{action}: {segOut.Count} segment(s) listed, {changed} changed");
+                    if ((action == "add" || action == "remove") && segOut.Count == 0) warnings.Add("no segment matched the selection");
                 }
                 finally
                 {
                     try { asm.EditAssembly(); } catch { }
                     doc.ClearSelection2(true);
                 }
-                if (action != "list")
+                if (action == "add" || action == "remove" || action == "import")
                 {
                     try { doc.EditRebuild3(); } catch { }
                     if (changed > 0)
@@ -193,8 +252,23 @@ namespace SolidworksExecution.Services
                     ["note"] = "A covering applies to whole route segments. For a covering on part of a segment (e.g. a manufacturer's free zone at a housing), split the segment first in SOLIDWORKS (Split Route) or use Fixed Length Covering; neither is in the Routing API.",
                     ["steps"] = steps,
                 };
+                if (action == "export")
+                {
+                    result.Remove("segments");
+                    result["file_path"] = filePath;
+                    result["exported"] = exported.Count;
+                    result["coverings"] = new JArray(exported.Values);
+                }
+                if (action == "import")
+                {
+                    result["applied_segments"] = changed;
+                    result["unmatched_entries"] = new JArray(imported.Where(kv => !usedImports.Contains(kv.Key))
+                        .Select(kv => new JObject { ["wires"] = kv.Value["wires"], ["part_number"] = kv.Value["part_number"] }));
+                    result["uncovered_segments"] = uncovered;
+                    result["note_import"] = "Applied where a segment's wire set equals an entry's exactly. uncovered_segments (2+ wires, no covering) are new wire sets: cover them with action='add' (segments=[ids]).";
+                }
                 if (warnings.Count > 0) result["warnings"] = warnings;
-                if (action == "list") return ReadOnlyResponse(request, doc, result);
+                if (action == "list" || action == "export") return ReadOnlyResponse(request, doc, result);
                 var response = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
@@ -223,6 +297,34 @@ namespace SolidworksExecution.Services
             {
                 return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
             }
+        }
+
+        // The order-independent key of a wire set (export / import match segments by it).
+        private static string WireSetKey(IEnumerable<string> wires) =>
+            string.Join("|", wires.Select(w => (w ?? "").Trim()).OrderBy(w => w, StringComparer.OrdinalIgnoreCase));
+
+        // Put a covering on a route segment (replacing one it has). The added covering is a copy:
+        // its properties are set again on the attached one (as the API's Edit Coverings example does);
+        // OuterDiameter set before AddCovering read back 0.
+        private static bool AddCoveringTo(IRouteProperty rp, JObject sj, string name, string pn, double od, int? color)
+        {
+            if (rp.HasCovering) { try { rp.RemoveCovering(); sj["replaced"] = true; } catch { } }
+            var cov = rp.CreateCovering() as Covering;
+            if (cov == null) { sj["error"] = "CreateCovering returned nothing"; return false; }
+            var ic = (ICovering)cov;
+            if (!string.IsNullOrEmpty(name)) ic.Name = name;
+            if (!string.IsNullOrEmpty(pn)) ic.PartNumber = pn;
+            ic.OuterDiameter = od;
+            if (color.HasValue) ic.Color = color.Value;
+            bool ok = rp.AddCovering(cov);
+            if (ok && rp.GetCovering() is ICovering att)
+            {
+                if (!string.IsNullOrEmpty(name)) att.Name = name;
+                if (!string.IsNullOrEmpty(pn)) att.PartNumber = pn;
+                att.OuterDiameter = od;
+                if (color.HasValue) att.Color = color.Value;
+            }
+            return ok;
         }
     }
 }

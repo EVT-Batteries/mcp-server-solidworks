@@ -47,7 +47,15 @@ namespace SolidworksExecution.Services
                 bool fit = p?.Value<bool?>("zoom_to_fit") ?? true;
                 int width = p?.Value<int?>("width") ?? 0;
                 int height = p?.Value<int?>("height") ?? 0;
-                string caption = p?.Value<string>("caption") ?? "";
+                // A caption typed with "\n" (backslash + n, as a tool argument often arrives) breaks
+                // lines too.
+                string caption = (p?.Value<string>("caption") ?? "").Replace("\\n", "\n");
+                // up = "z": standard views for a Z-up model (SolidWorks' named views are Y-up, so a
+                // Z-up assembly showed tipped over in 'isometric').
+                string up = (p?.Value<string>("up") ?? "y").Trim().ToLowerInvariant();
+                if (up != "y" && up != "z")
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "INVALID_PARAMETER", "up must be 'y' (SolidWorks' standard views) or 'z' (a Z-up model).");
 
                 if (string.IsNullOrWhiteSpace(filePath) ||
                     !filePath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
@@ -68,6 +76,9 @@ namespace SolidworksExecution.Services
                             "INVALID_PARAMETER",
                             $"view '{view}' is not supported. Supported: current, {string.Join(", ", StandardViews.Keys)}.");
                     modelDoc.ShowNamedView2("", viewId);
+                    if (up == "z" && !ViewZUp(modelDoc))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "VIEW_FAILED", "Could not set the Z-up view orientation (IModelView.Orientation3).");
                 }
                 // focus: zoom to these components (instance names or paths; world boxes), optionally
                 // with everything else hidden for the capture (isolate) and shown again afterwards.
@@ -160,6 +171,7 @@ namespace SolidworksExecution.Services
                 info["width"] = outW;
                 info["height"] = outH;
                 info["view"] = view;
+                if (up == "z" && !string.Equals(view, "current", StringComparison.OrdinalIgnoreCase)) info["up"] = "z";
                 if (_isolated != null)
                 {
                     info["isolated"] = true;
@@ -206,6 +218,32 @@ namespace SolidworksExecution.Services
                 if (_isolated != null) try { RestoreHidden(_solidWorks.IActiveDoc2 as IModelDoc2); } catch { }
                 if (_hiddenToggles != null) try { RestoreSketchDisplay(); } catch { }
             }
+        }
+
+        // Turn the current (standard, Y-up) view into the same view of a Z-up model: model Z is
+        // shown where SolidWorks shows Y, and -Y faces the viewer in 'front'. The view rotation R
+        // maps model points to view coordinates as row vectors (v = p * R, as ZoomToModelBox reads
+        // it); the Z-up view is R' = M * R with M taking (x, y, z) to (x, z, -y).
+        private bool ViewZUp(IModelDoc2 doc)
+        {
+            try
+            {
+                var view = doc.ActiveView as IModelView;
+                var a = (view?.Orientation3 as MathTransform)?.ArrayData as double[];
+                if (a == null || a.Length < 13) return false;
+                var b = (double[])a.Clone();
+                for (int j = 0; j < 3; j++)
+                {
+                    b[3 + j] = -a[6 + j];   // R'[1] = -R[2]
+                    b[6 + j] = a[3 + j];    // R'[2] =  R[1]
+                }
+                var mu = _solidWorks.GetMathUtility() as IMathUtility;
+                if (!(mu?.CreateTransform(b) is MathTransform t)) return false;
+                view.Orientation3 = t;
+                doc.GraphicsRedraw2();
+                return true;
+            }
+            catch { return false; }
         }
 
         private IAssemblyDoc _isolated;
