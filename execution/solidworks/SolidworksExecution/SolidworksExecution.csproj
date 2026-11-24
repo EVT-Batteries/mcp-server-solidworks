@@ -112,6 +112,7 @@
     <Compile Include="Services\SolidWorksService.Replace.cs" />
     <Compile Include="Services\SolidWorksService.Health.cs" />
     <Compile Include="Services\SolidWorksService.ComponentState.cs" />
+    <Compile Include="Services\SolidWorksService.FileDependencies.cs" />
     <Compile Include="Services\SolidWorksService.Configuration.cs" />
     <Compile Include="Services\SolidWorksService.Lightweight.cs" />
     <Compile Include="Services\SolidWorksService.Interference.cs" />

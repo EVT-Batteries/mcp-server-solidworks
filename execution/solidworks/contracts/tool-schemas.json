@@ -469,6 +469,23 @@
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, reference?, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached."
  },
+ "file_dependencies": {
+  "description": "Lists the files a part, assembly or drawing references, down the whole tree, WITHOUT opening it (ISldWorks.GetDocumentDependencies2 per file, one level per call, resolved with SOLIDWORKS' search rules). Each file: sync state from its Windows attributes (local, always_keep = pinned, cloud_only = placeholder downloaded on first read, missing), read-only attribute, SOLIDPILOT_READONLY_PATHS match, the documents that reference it, and the same-name drawings next to each model (the drawings Pack and Go includes). Cloud-only files are not read unless read_cloud_only. Does NOT increment state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "path": "string (optional — .sldprt / .sldasm / .slddrw file; default: the active document's file)",
+    "recursive": "boolean (optional, default true — follow references of references)",
+    "include_drawings": "boolean (optional, default true — add same-name .slddrw files in each model's folder)",
+    "read_cloud_only": "boolean (optional, default false — read cloud-only placeholders too, which downloads them)",
+    "show": "string (optional, default all — all | problems (missing, cloud-only, unread) | none)",
+    "limit": "integer (optional, default 1000 — maximum files listed)",
+    "time_budget_s": "number (optional, default 120, 0 = none — stop reading files after this many seconds, truncated=true)"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {root, recursive, documents_read, counts:{files, models, drawings_same_name, missing, cloud_only, always_keep, local, virtual, read_only_attribute, in_read_only_location, total_mb}, folders:[{folder, files, local?, always_keep?, cloud_only?, missing?, read_only_attribute?, read_only_location?}], files?:[{path, depth, sync, size_kb?, referenced_by?, drawing?, virtual?, read_only_attribute?, read_only_location?, note?}], missing?, unread_cloud_only?, truncated_at?, truncated?, truncated_reason?}."
+ },
  "set_component_state": {
   "description": "Sets the suppression state (IComponent2.SetSuppression2: suppressed, lightweight, resolved, fully resolved) and / or visibility (IComponent2.Visible) of components of the active assembly, nested ones by instance path; all names are resolved before anything changes. Rebuilds (EditRebuild3), never saves. Increments state_version.",
   "input": {

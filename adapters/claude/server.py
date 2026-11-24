@@ -117,7 +117,7 @@ LONG_TOOLS = {
     "open_document", "save_document", "compare_assemblies", "insert_component", "add_mate",
     "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
     "replace_component", "insert_part", "edit_bodies", "check_path_clearance",
-    "analyze_model", "connector_cavities", "add_connector_pins",
+    "analyze_model", "connector_cavities", "add_connector_pins", "file_dependencies",
 }
 
 
@@ -572,6 +572,39 @@ def component_status(
     return _call("component_status", {
         "components": components, "match": match, "state": state, "recursive": recursive,
         "limit": limit, "include_mates": include_mates, "boxes": boxes,
+        "time_budget_s": time_budget_s})
+
+
+# ---------------------------------------------------------------------------
+# Tool: file_dependencies
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def file_dependencies(
+    path: str = "",
+    recursive: bool = True,
+    include_drawings: bool = True,
+    read_cloud_only: bool = False,
+    show: str = "all",
+    limit: int = 1000,
+    time_budget_s: Annotated[float, Field(ge=0)] = 120.0,
+) -> str:
+    """Read-only: the files a part, assembly or drawing references, down the whole tree, WITHOUT
+    opening it in SOLIDWORKS (does NOT change state_version; nothing is loaded or written). path:
+    the .sldprt / .sldasm / .slddrw file (default: the active document's file). Each file comes from
+    SOLIDWORKS' own reference list (GetDocumentDependencies2, resolved with its search rules) and is
+    reported with: sync = local | always_keep (pinned in a cloud-synced folder) | cloud_only
+    (OneDrive / SharePoint placeholder, downloaded when first read) | missing; read_only_attribute;
+    read_only_location (matches SOLIDPILOT_READONLY_PATHS); referenced_by (the documents that
+    reference it); depth (0 = path). include_drawings adds the .slddrw with the same name in each
+    model's folder (the drawings Pack and Go includes). Cloud-only files are listed but not read
+    (their own references stay unknown, counted in unread_cloud_only) unless read_cloud_only=True,
+    which downloads them. show: 'all', 'problems' (missing, cloud-only, unread) or 'none' (counts
+    and folders only). The result also gives counts, a per-folder summary and the missing paths.
+    Use it before opening a large assembly, before Pack and Go, or to check that a copied tree is
+    complete; component_status reports the components of an assembly that is already open."""
+    return _call("file_dependencies", {
+        "path": path, "recursive": recursive, "include_drawings": include_drawings,
+        "read_cloud_only": read_cloud_only, "show": show, "limit": limit,
         "time_budget_s": time_budget_s})
 
 

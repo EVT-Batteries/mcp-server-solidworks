@@ -229,6 +229,7 @@ namespace SolidworksExecution.Controllers
                 case "edit_bodies":            return _service.EditBodies(request);
                 case "check_rebuild":          return _service.CheckRebuild(request);
                 case "component_status":       return _service.ComponentStatus(request);
+                case "file_dependencies":      return _service.FileDependencies(request);
                 case "set_component_state":    return _service.SetComponentState(request);
                 case "manage_configurations":  return _service.ManageConfigurations(request);
                 case "analyze_slddrw_test":    return _service.AnalyzeDrawing(request);
