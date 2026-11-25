@@ -376,3 +376,27 @@ Ideas (open):
 - Ideas: fill the title block (drawing custom properties); wire colours on the flat legs; connector
   drawing blocks for the "blocks" display; dimensions instead of notes for bundle lengths; place
   each connector table next to its connector; a formboard sheet split for long harnesses.
+
+## Session 10 (re-routing after a mechanical release: route_follow, world placement, summaries)
+
+Found while moving the connectors of four harnesses onto a new mechanical release and redrawing
+their routes. Each item replaced a client script written three times in a day. Adapter-side
+(Python, `server.py` + `assembly_math.py`) except the stub check (C#, `RouteStubs.cs`).
+
+| Item | Change | Why |
+|---|---|---|
+| a | `route_follow(route, plan, from_to, ...)`: coverings exported, `import_from_to(replaces)`, free plan ends moved onto the new stub ends / fan joins with their lead points, dry run (sharp junctions, cycles, `no_room`), draw, coverings re-applied, status / CSV written; returns a short summary | the same 100-line driver per harness; the ends to move were found by hand |
+| b | `routing_status(check_stubs)` (default on with `route`): every used connection point, its offset from the route sketch, `detached` | a stub stays where the connector was at the import; nothing reported it (fans failed later with `NO_USED_CAVITIES`) |
+| c | `place_component(world_transform | world_offset, configurations)`: target in the active assembly's frame, converted to the parent's frame and set in the parent's document, in each configuration, read back per configuration and from the top | fixed components of multi-configuration harnesses keep one position per configuration: moves reverted |
+| d | `seat_on_stud(component, stud_component, face_component, gap, apply)`: hole coaxial with the nearest parallel stud, contact face on the terminal face | ring lugs were seated with a face dump + script per device |
+| e | `analyze_assembly(faces)` filters (`kind`, `axis`, `radius_min/max`, `near` / `within`, `world`) | a contactor model has 2,890 faces |
+| f | `check_interference(group_by_pair)`, `component_status(fields)`, `compact` on `set_component_state` / `import_from_to` / `route_covering` / `routing_status`, `check_path_clearance(frame_component)` | results echoed every component, wire and segment |
+
+Tested live (2026-11-25, ~1000-component assembly): stub check (20 stubs, 0 detached, compact
+status ~1 kB), `route_follow` dry run on an 18-end plan (all ends found, 0 moves, dry run clean),
+`place_component(world_offset)` on a part one and two levels down (5 configurations held, world
+check 0.0 mm), `seat_on_stud` on two ring lugs seated by hand before (0.000 / 0.002 mm), face
+filters, `group_by_pair`, `frame_component`. The first `seat_on_stud` picked a face on the wrong
+side of the lug (one "up" direction for every candidate): each candidate face is now paired with
+the lug face looking at it. Not yet run: `route_follow` with `reimport` / `draw` (its steps are
+the tools the drivers it replaces called).

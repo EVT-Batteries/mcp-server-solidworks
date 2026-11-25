@@ -401,7 +401,29 @@ Results are in `$r.cadState.features` (often one JSON string).
   `ICurve.GetTessPts(chord, length, start, end)`; full circles from `ICurve.CircleParams`.
 - **Testing a new parameter before the MCP restart**: the running adapter drops parameters it
   does not know without an error (the call succeeds without them). Call the execution server
-  directly (`SwCall` above) until the MCP is restarted.
+  directly (`SwCall` above) until the MCP is restarted. Adapter-side code can be run before the
+  restart too: import `server` from `adapters/claude` in a Python process (same requirements),
+  set `server._state_version = server.get_state()` and call `server._TOOL_FUNCS[name](**kwargs)`.
+- **Adapter-side composites and summaries (2026-11-25)**: `route_follow`, `seat_on_stud`, the
+  world placement of `place_component` and the filters / compact modes (`analyze_assembly`
+  face filters, `check_interference(group_by_pair)`, `component_status(fields)`, `compact` on
+  `set_component_state` / `import_from_to` / `route_covering` / `routing_status`,
+  `check_path_clearance(frame_component)`) call the execution server through `_call_json` and
+  reshape the payload with `_text_with`; their pure parts (transforms, face filters, stud
+  seating, plan following) live in `adapters/claude/assembly_math.py`, tested without
+  SolidWorks in `tests/test_assembly_math.py`. A multi-step client script that keeps recurring
+  in project work (re-import + move plan ends + redraw, per-configuration placement) belongs
+  here as one tool with a short summary: each round trip of a long JSON result costs tokens.
+  Lessons behind them:
+  - A FIXED component of a multi-configuration sub-assembly keeps one position per
+    configuration: a move made in one configuration reverted when another configuration
+    rebuilt. Set it in every configuration that shows it, then read each back.
+  - A Routing stub is drawn where its connection point was at the from-to import and does not
+    follow the connector afterwards (no error anywhere). `routing_status(check_stubs)` compares
+    each used connection point with the route sketch's points (mapped by the route component's
+    transform, so a nested route works too).
+  - `analyze_assembly(faces)` on a part with thousands of faces (a contactor model: 2,890)
+    takes minutes: filter in the adapter, and cache what a script needs.
 
 ## Committing
 

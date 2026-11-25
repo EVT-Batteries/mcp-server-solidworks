@@ -20,6 +20,7 @@ from mcp.shared.exceptions import MCPError
 from config import LONG_HTTP_TIMEOUT
 from execution_client import call_tool, get_state, ensure_ready as _ensure_ready, ExecutionLayerError
 from response_mapper import map_response
+import assembly_math as am
 # NOTE: pycompiler is reached via `from ir_execution_port import run_feature_graph` imported
 # LAZILY inside rebuild_from_ir and submit_feature_graph — a missing compiler tree degrades to a
 # clean tool error instead of killing the whole MCP server at startup.
@@ -178,6 +179,65 @@ def _call(tool_name: str, params: dict) -> str:
             tool_name, _next_operation_id(), _state_version, params, timeout)
     _update_state_version(response)
     return map_response(response)
+
+
+def _payload_of(response: dict) -> dict:
+    """The JSON object a tool returns as its first cadState feature ({} when there is none)."""
+    feats = (response.get("cadState") or {}).get("features") or []
+    if feats and isinstance(feats[0], str):
+        try:
+            value = json.loads(feats[0])
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _call_json(tool_name: str, params: dict) -> tuple:
+    """(raw response, payload dict); raises like _call on a FAILED response."""
+    raw = _call_raw(tool_name, params)
+    map_response(raw)
+    return raw, _payload_of(raw)
+
+
+def _text_with(raw: dict, payload: dict) -> str:
+    """The usual result text of `raw` with its payload replaced (compact / filtered results)."""
+    out = dict(raw)
+    state = dict(out.get("cadState") or {})
+    state["features"] = [json.dumps(payload, separators=(",", ":"))]
+    out["cadState"] = state
+    return map_response(out)
+
+
+def _keep_problems(payload: dict, key: str, ok) -> None:
+    """Compact a list in place: `<key>_count` + only the entries `ok` rejects."""
+    items = payload.get(key)
+    if not isinstance(items, list):
+        return
+    payload[f"{key}_count"] = len(items)
+    bad = [x for x in items if not ok(x)]
+    if bad:
+        payload[key] = bad
+    else:
+        payload.pop(key, None)
+
+
+def _component_transforms(names: list) -> dict:
+    """{instance path: component_status entry} for the named components of the active assembly."""
+    _, pl = _call_json("component_status", {"components": json.dumps(names), "recursive": True,
+                                            "limit": max(10, len(names)), "include_mates": False,
+                                            "boxes": False, "time_budget_s": 60.0})
+    listed = {c.get("component"): c for c in pl.get("components") or []}
+    out = {}
+    for n in names:
+        hit = listed.get(n) or next((c for p, c in listed.items() if p and p.lower() == n.lower()), None)
+        if hit is not None:
+            out[n] = hit
+    missing = [n for n in names if n not in out or not isinstance(out[n].get("transform"), list)]
+    if missing:
+        raise ToolError(f"component(s) not found or without transform: {', '.join(missing)} "
+                        f"({pl.get('not_found_hint') or 'check the instance paths'})")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +443,14 @@ def open_new_assembly(template_path: str = "") -> str:
 def analyze_assembly(
     analysis_type: Literal["components", "components_flat", "mates", "faces", "edges"],
     component: str = "",
+    world: bool = False,
+    kind: Literal["", "plane", "cylinder", "cone", "sphere", "other"] = "",
+    near: str = "",
+    within: Annotated[float, Field(ge=0)] = 0.0,
+    axis: str = "",
+    axis_tol_deg: Annotated[float, Field(ge=0, le=90)] = 2.0,
+    radius_min: Annotated[float, Field(ge=0)] = 0.0,
+    radius_max: Annotated[float, Field(ge=0)] = 0.0,
 ) -> str:
     """Analyze the active ASSEMBLY document (read-only, does NOT change state).
     analysis_type='components': top-level component occurrences in FEATURE-TREE order — per
@@ -403,11 +471,43 @@ def analyze_assembly(
         payload carries the transform). A lightweight component (and its lightweight parents) is
         resolved first and listed in resolved_from_lightweight; resolving can rename instances.
     Components report `lightweight: true` when they are lightweight. An unknown name fails with
-    the closest instance paths."""
+    the closest instance paths.
+    Face filters (faces only, applied by the adapter; a large part has thousands of faces):
+    world=True reports point / origin / normal / axis in the ACTIVE assembly's coordinates
+    (frame='world'); near / axis are then given in those coordinates too, else component-local.
+    kind: 'plane' | 'cylinder' | 'cone' | 'sphere' | 'other'. near: JSON [x,y,z] (m): faces whose
+    point lies within `within` (m, 0 = any), nearest first, each with distance_mm, and
+    axis_distance_mm (cylinder: near to its axis line) or plane_distance_mm (plane: signed, along
+    its normal). axis: JSON [dx,dy,dz]: cylinders whose axis is parallel (either sense) and planes
+    whose normal points along it, within axis_tol_deg. radius_min / radius_max (m): cylinders by
+    radius. The result keeps faces_total and filters. Ring terminal on a stud: seat_on_stud."""
     params = {"analysis_type": analysis_type}
     if component:
         params["component"] = component
-    return _call("analyze_assembly", params)
+    filtered = world or kind or near.strip() or axis.strip() or radius_min or radius_max
+    if analysis_type != "faces" or not filtered:
+        return _call("analyze_assembly", params)
+    near_p = am.parse_numbers(near, "near")
+    axis_v = am.parse_numbers(axis, "axis")
+    for name, v in (("near", near_p), ("axis", axis_v)):
+        if v is not None and len(v) != 3:
+            raise ToolError(f"analyze_assembly: {name} needs 3 numbers")
+    raw, pl = _call_json("analyze_assembly", params)
+    faces = pl.get("faces") or []
+    if world:
+        t = pl.get("transform")
+        if not isinstance(t, list) or len(t) < 12:
+            raise ToolError("analyze_assembly: the faces payload has no component transform to map to world")
+        faces = am.faces_to_world(faces, t)
+        pl["frame"] = "world"
+    kept = am.filter_faces(faces, kind=kind, near=near_p, within=within, axis=axis_v,
+                           axis_tol_deg=axis_tol_deg, radius_min=radius_min, radius_max=radius_max)
+    pl["faces_total"] = len(pl.get("faces") or [])
+    pl["faces"] = kept
+    pl["filters"] = {k: v for k, v in (("kind", kind), ("near", near_p), ("within", within or None),
+                                       ("axis", axis_v), ("radius_min", radius_min or None),
+                                       ("radius_max", radius_max or None)) if v}
+    return _text_with(raw, pl)
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +593,7 @@ def check_interference(
     compact: bool = False,
     ignore_same_parent: bool = False,
     boxes: bool = False,
+    group_by_pair: bool = False,
 ) -> str:
     """Interference detection in the ACTIVE assembly (read-only: does NOT change state_version,
     never saves).
@@ -524,14 +625,28 @@ def check_interference(
     sit in the same sub-assembly (e.g. a harness's own bundles meeting at their split points);
     reported as ignored_same_parent. boxes=True: `neighbours` as [{component, box_mm}] (world
     bounding boxes, mm: rough keep-out zones when looking for free space).
+    group_by_pair=True: `pairs` instead of `interferences`: one entry per component pair (count,
+    total_mm3, max_mm3), largest total first, at most `limit` pairs (all interferences are
+    counted; a rigid harness touching a tie mount in 40 places is one line). Use it for reviews of
+    a whole harness; then look at one pair's interferences without it.
     To test a path BEFORE drawing it, use check_path_clearance."""
-    return _call("check_interference", {
+    params = {
         "components": components, "clearance": clearance,
         "treat_coincidence_as_interference": treat_coincidence_as_interference,
         "treat_subassemblies_as_components": treat_subassemblies_as_components,
         "include_hidden": include_hidden, "resolve_lightweight": resolve_lightweight,
         "limit": limit, "compact": compact, "ignore_same_parent": ignore_same_parent,
-        "boxes": boxes})
+        "boxes": boxes}
+    if not group_by_pair:
+        return _call("check_interference", params)
+    params["limit"] = max(limit, 100000)
+    raw, pl = _call_json("check_interference", params)
+    items = pl.pop("interferences", None) or []
+    pl.pop("interferences_truncated_at", None)
+    pl["pairs"] = am.group_interferences(items, limit)
+    pl["pair_count"] = len(am.group_interferences(items, len(items) or 1))
+    pl["total_mm3"] = round(sum(float(i.get("volume_mm3") or 0) for i in items), 3)
+    return _text_with(raw, pl)
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +662,7 @@ def component_status(
     limit: int = 500,
     boxes: bool = False,
     time_budget_s: Annotated[float, Field(ge=0)] = 60.0,
+    fields: str = "",
 ) -> str:
     """Read-only status of the active assembly's components (does NOT change state_version).
     components: JSON list of component names or instance paths ("Sub-1/Part-1", nested ones
@@ -568,11 +684,21 @@ def component_status(
     Limits: from the top assembly, mates are found reliably only when held by the ACTIVE
     assembly (e.g. top-level mates to nested parts); to see the mates a sub-assembly holds, open
     that sub-assembly and run component_status there. `fixed` is reliable for components of the
-    active assembly itself (open the sub-assembly for its own components)."""
-    return _call("component_status", {
+    active assembly itself (open the sub-assembly for its own components).
+    fields: comma-separated keys to keep per component (component is always kept), e.g.
+    'transform' or 'suppression,file': a short answer when only positions or states matter."""
+    params = {
         "components": components, "match": match, "state": state, "recursive": recursive,
         "limit": limit, "include_mates": include_mates, "boxes": boxes,
-        "time_budget_s": time_budget_s})
+        "time_budget_s": time_budget_s}
+    keep = [f.strip() for f in fields.replace(";", ",").split(",") if f.strip()]
+    if not keep:
+        return _call("component_status", params)
+    raw, pl = _call_json("component_status", params)
+    pl["components"] = [{k: v for k, v in c.items() if k == "component" or k in keep}
+                        for c in pl.get("components") or []]
+    pl["fields"] = keep
+    return _text_with(raw, pl)
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +745,7 @@ def set_component_state(
     referenced_configuration: str = "",
     include_mates: bool = False,
     time_budget_s: Annotated[float, Field(ge=0)] = 60.0,
+    compact: bool = False,
 ) -> str:
     """Suppresses, resolves (unsuppresses) or makes lightweight components of the active assembly,
     shows or hides them, and / or sets which configuration of their file they use
@@ -634,14 +761,23 @@ def set_component_state(
     component the change result (ok / failed / bad_state) and its status after the rebuild (as
     component_status). Run check_rebuild before saving: it reports broken mates of the whole tree.
     include_mates=True adds each component's mates to that report: on an assembly of ~1000
-    components the mate scan takes minutes per component, bounded by time_budget_s."""
+    components the mate scan takes minutes per component, bounded by time_budget_s.
+    compact=True: counts instead of the per-component lists (changes_count, components_count),
+    keeping only the changes that did not succeed (result other than ok, or an error)."""
     params: dict = {"components": components, "suppression": suppression,
                     "include_mates": include_mates, "time_budget_s": time_budget_s}
     if visible is not None:
         params["visible"] = visible
     if referenced_configuration:
         params["referenced_configuration"] = referenced_configuration
-    return _call("set_component_state", params)
+    if not compact:
+        return _call("set_component_state", params)
+    raw, pl = _call_json("set_component_state", params)
+    _keep_problems(pl, "changes", lambda c: c.get("result", "ok") == "ok"
+                   and not any(k.endswith("error") for k in c))
+    pl["components_count"] = len(pl.pop("components", None) or [])
+    pl.pop("note", None)
+    return _text_with(raw, pl)
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +819,9 @@ def place_component(
     component: str,
     transform_json: str = "[]",
     fixed: bool | None = None,
+    world_transform: str = "",
+    world_offset: str = "",
+    configurations: str = "",
 ) -> str:
     """Set the transform and/or the fixed state of an EXISTING component of the active assembly
     (insert_component does this for a component it inserts). Bumps state_version.
@@ -695,11 +834,170 @@ def place_component(
     fixed: True fixes the component where it is (or where transform_json puts it), False floats
         it; omit to keep its state.
     Mates driving a component still win on rebuild: delete or suppress them to place it freely.
-    Returns the component's fixed state and transform."""
-    params: dict = {"component": component, "transform_json": transform_json}
-    if fixed is not None:
-        params["fixed"] = fixed
-    return _call("place_component", params)
+    Returns the component's fixed state and transform.
+    Placing in the ACTIVE assembly's frame, also inside a sub-assembly (adapter-side):
+    world_transform: JSON 13 numbers, or 3 = new translation (m) keeping the rotation;
+    world_offset: JSON [dx,dy,dz] (m): move by this vector (after world_transform if both).
+    For a nested component ('Sub-1/Part-1') the target is converted to the parent's frame and set
+    in the parent's own document (activated, then the active document again).
+    configurations: '' = the parent's active configuration only; 'all' or a JSON list: set in
+    each of them. A fixed component keeps one position PER CONFIGURATION, so a move in one
+    configuration reverts when another one rebuilds: set every configuration that shows it.
+    With configurations alone, transform_json is taken as world_transform.
+    Each configuration is read back after all are set (dev_mm: largest difference, 0 = held),
+    the parent's active configuration is restored, and world_check_mm compares the position seen
+    from the active assembly with the target."""
+    use_world = world_transform.strip() or world_offset.strip() or configurations.strip()
+    if not use_world:
+        params: dict = {"component": component, "transform_json": transform_json}
+        if fixed is not None:
+            params["fixed"] = fixed
+        return _call("place_component", params)
+    if not world_transform.strip() and transform_json.strip() not in ("", "[]"):
+        world_transform = transform_json
+    report = _place_world(component, am.parse_numbers(world_transform, "world_transform"),
+                          am.parse_numbers(world_offset, "world_offset"), configurations, fixed)
+    return "COMPLETED | place_component | " + json.dumps(report, separators=(",", ":"))
+
+
+def _config_names(configurations: str) -> list:
+    """[None] (active only), every configuration of the active document ('all'), or the list."""
+    c = configurations.strip()
+    if not c:
+        return [None]
+    if c.lower() == "all":
+        _, pl = _call_json("manage_configurations", {"action": "list", "name": "", "new_name": "",
+                                                     "activate": True})
+        return [x["name"] for x in pl.get("configurations") or []]
+    names = json.loads(c)
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ToolError("configurations: 'all' or a JSON list of configuration names")
+    return names
+
+
+def _activate_config(name: str) -> None:
+    _call_json("manage_configurations", {"action": "activate", "name": name, "new_name": "",
+                                         "activate": True})
+
+
+def _place_world(component: str, world_transform, world_offset, configurations: str,
+                 fixed) -> dict:
+    """Place `component` (instance path of the active assembly) at a world target, in its parent's
+    document and in each configuration asked; verify per configuration and from the top."""
+    parts = component.split("/")
+    parent = "/".join(parts[:-1])
+    st = _component_transforms([component] + ([parent] if parent else []))
+    current = st[component]["transform"]
+    target = am.target_world(current, world_transform, world_offset)
+    top_title = (_call_raw("verify_state", {}).get("cadState") or {}).get("activeDocument")
+    if parent:
+        local = am.xf_mul(target, am.xf_inv(st[parent]["transform"]))
+        sub_file = st[parent].get("file") or ""
+        if not sub_file:
+            raise ToolError(f"place_component: no file for parent '{parent}'")
+        _call_json("activate_document", {"title": os.path.basename(sub_file)})
+        leaf = parts[-1]
+    else:
+        local, leaf = target, component
+    report: dict = {"component": component, "placed_in": None, "leaf": leaf,
+                    "move_mm": round(am.norm(am.sub(target[9:12], current[9:12])) * 1000.0, 4),
+                    "target_world": [round(v, 7) for v in target],
+                    "local": [round(v, 7) for v in local], "configurations": []}
+    try:
+        report["placed_in"] = (_call_raw("verify_state", {}).get("cadState") or {}).get("activeDocument")
+        cfgs = _config_names(configurations)
+        active_before = None
+        if cfgs != [None]:
+            _, pl = _call_json("manage_configurations", {"action": "list", "name": "",
+                                                         "new_name": "", "activate": True})
+            active_before = pl.get("active")
+        for cfg in cfgs:
+            if cfg:
+                _activate_config(cfg)
+            params = {"component": leaf, "transform_json": json.dumps(local)}
+            if fixed is not None:
+                params["fixed"] = fixed
+            _call_json("place_component", params)
+        for cfg in cfgs:
+            if cfg:
+                _activate_config(cfg)
+            got = _component_transforms([leaf])[leaf]["transform"]
+            report["configurations"].append({"configuration": cfg or "(active)",
+                                             "dev_mm": am.max_dev_mm(got, local)})
+        if active_before and cfgs[-1] != active_before:
+            _activate_config(active_before)
+        report["active_configuration"] = active_before
+    finally:
+        if parent and top_title:
+            _call_json("activate_document", {"title": top_title})
+    if parent:
+        got = _component_transforms([component])[component]["transform"]
+        dev = am.max_dev_mm(got, target)
+        if dev > 0.001:
+            _call_json("check_rebuild", {"rebuild": True, "recursive": False,
+                                         "include_warnings": False, "resolve_lightweight": False,
+                                         "force": False, "verbose": False})
+            got = _component_transforms([component])[component]["transform"]
+            dev = am.max_dev_mm(got, target)
+            report["rebuilt_top"] = True
+        report["world_check_mm"] = dev
+    report["held"] = all(c["dev_mm"] <= 0.001 for c in report["configurations"]) and \
+        report.get("world_check_mm", 0) <= 0.001
+    return report
+
+
+def _world_faces(component: str) -> tuple:
+    """(faces in the active assembly's coordinates, component transform)."""
+    _, pl = _call_json("analyze_assembly", {"analysis_type": "faces", "component": component})
+    t = pl.get("transform")
+    if not isinstance(t, list) or len(t) < 12:
+        raise ToolError(f"analyze_assembly gave no transform for '{component}'")
+    return am.faces_to_world(pl.get("faces") or [], t), t
+
+
+@mcp.tool(structured_output=False)
+def seat_on_stud(
+    component: str,
+    stud_component: str,
+    face_component: str = "",
+    stud_radius_min: Annotated[float, Field(ge=0)] = 0.0,
+    stud_radius_max: Annotated[float, Field(ge=0)] = 0.0,
+    face_index: int = -1,
+    gap: float = 0.0,
+    search: Annotated[float, Field(gt=0)] = 0.015,
+    face_reach: Annotated[float, Field(gt=0)] = 0.04,
+    apply: bool = False,
+    configurations: str = "",
+) -> str:
+    """Seat a ring terminal (or washer, any part with a hole) on a stud of the ACTIVE assembly: its
+    hole coaxial with the stud and its contact face on the terminal face. Read-only unless apply.
+    component: the ring part (instance path, may be nested, e.g. 'Harness-1/Lug-1');
+    stud_component: the part carrying the stud (bolt, terminal); face_component: the part whose
+    face the ring sits on (default stud_component; e.g. a busbar under a bolt).
+    The hole is the ring's cylinder perpendicular to its largest flat face; the stud is the
+    cylinder of stud_component parallel to it with a radius below the hole's (stud_radius_min /
+    max in m to choose, e.g. 0.0019-0.0021 for M4), whose axis passes nearest the hole (within
+    search, m). The terminal face: a plane of face_component perpendicular to the stud, facing
+    the ring, its mid point within face_reach (m) of the stud axis, nearest the ring's contact
+    face along the axis (within search); face_index picks another (other_faces lists them with
+    offset_mm along the axis and area). gap (m): leave this distance (e.g. a washer under the
+    ring: its thickness). Rotation is kept: the hole must already be parallel to the stud.
+    Returns delta_mm (the move), stud, hole, face, contact_face, other_faces; apply=True moves it
+    (place_component world_offset, in each of `configurations` as there) and adds `placed`."""
+    try:
+        lug_faces, _ = _world_faces(component)
+        stud_faces, _ = _world_faces(stud_component)
+        fc = face_component.strip() or stud_component
+        face_faces = stud_faces if fc == stud_component else _world_faces(fc)[0]
+        res = am.seat_on_stud(lug_faces, stud_faces, stud_component, face_faces, fc,
+                              stud_radius_min=stud_radius_min, stud_radius_max=stud_radius_max,
+                              face_index=face_index, gap=gap, search=search, face_reach=face_reach)
+    except ValueError as exc:
+        raise ToolError(f"seat_on_stud: {exc}") from exc
+    res["component"] = component
+    if apply:
+        res["placed"] = _place_world(component, None, res["delta"], configurations, None)
+    return "COMPLETED | seat_on_stud | " + json.dumps(res, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
@@ -1685,7 +1983,10 @@ def sweep_circular(
 def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
                    terminations: str = "",
                    max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0,
-                   csv_path: str = "", compare_to: str = "", csv_note: str = "") -> str:
+                   csv_path: str = "", compare_to: str = "", csv_note: str = "",
+                   check_stubs: bool = True,
+                   stub_tolerance_mm: Annotated[float, Field(gt=0)] = 0.05,
+                   compact: bool = False) -> str:
     """Read SOLIDWORKS Routing state (read-only, does NOT change state_version).
     Always: whether the Routing add-in is loaded and its cable / component library files;
     verbose=True: every library file location and the from-to header definitions (an EMPTY one
@@ -1719,7 +2020,16 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         terminations), one row per wire in wire-number order, csv_note as a '# ' first line.
     compare_to: an earlier CSV of the same table (e.g. the file being replaced: it is read
         before it is overwritten): adds Previous_mm and Delta_mm per wire (its CutLength_mm), and
-        the result reports the wires that changed by more than 1 mm."""
+        the result reports the wires that changed by more than 1 mm.
+    check_stubs (with route, default on): route.stub_check lists every connection point the
+    route's wires use (end 'REF.pin', component, location_mm, stub_end_mm, direction, offset_mm =
+    distance from the connection point to the nearest point of the route sketch) and `detached`:
+    the ones off the route by more than stub_tolerance_mm. A connector moved after the from-to
+    import keeps its OLD stub in the route sketch (no error anywhere; its wires stay at the old
+    place): re-import (import_from_to replaces=..., or route_follow) to fix it. not_found: wire
+    ends whose connector or pin was not found in the active assembly.
+    compact=True: route.wires / segments as counts, keeping only wires with errors or sharp
+    bends, and stub_check.stubs dropped (detached kept)."""
     params = {"route": route, "verbose": verbose}
     if max_kink_deg != 15.0:
         params["max_kink_deg"] = max_kink_deg
@@ -1727,6 +2037,13 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         params["connectors"] = connectors
     if terminations.strip():
         params["terminations"] = terminations
+    if route.strip() and check_stubs:
+        params["check_stubs"] = True
+        params["stub_tolerance_mm"] = stub_tolerance_mm
+    if compact and not csv_path.strip():
+        raw, pl = _call_json("routing_status", params)
+        _compact_status(pl)
+        return _text_with(raw, pl)
     if not csv_path.strip():
         return _call("routing_status", params)
     if not route.strip():
@@ -1740,10 +2057,28 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
     except (IndexError, ValueError, AttributeError) as exc:
         raise ToolError(f"routing_status: no wire table in the result to write ({exc}).") from exc
     rows, changed = _write_wire_csv(csv_path, wires, previous, csv_note)
+    if compact:
+        pl = _payload_of(raw)
+        _compact_status(pl)
+        text = _text_with(raw, pl)
     text += f" | csv={csv_path} rows={rows}"
     if compare_to.strip():
         text += f" | changed_over_1mm={len(changed)}: {', '.join(changed)}"
     return text
+
+
+def _compact_status(pl: dict) -> None:
+    """routing_status payload in short (in place): wires with errors or sharp bends only, segment
+    and stub lists as counts (detached stubs kept)."""
+    rj = pl.get("route")
+    if not isinstance(rj, dict):
+        return
+    _keep_problems(rj, "wires", lambda w: not w.get("errors") and not w.get("sharp_bends"))
+    if isinstance(rj.get("segments"), list):
+        rj["segments_count"] = len(rj.pop("segments"))
+    sc = rj.get("stub_check")
+    if isinstance(sc, dict) and isinstance(sc.get("stubs"), list):
+        sc["stubs_count"] = len(sc.pop("stubs"))
 
 
 def _wire_sort_key(name: str):
@@ -1944,6 +2279,7 @@ def import_from_to(
     edit_route_first: bool = False,
     replaces: str = "",
     configurations: str = "[]",
+    compact: bool = False,
 ) -> str:
     """Import wires from a from-to list into the ACTIVE ASSEMBLY (SOLIDWORKS Routing
     'Start by From/To', IRouteManager.ImportFromToList). Bumps state_version.
@@ -1976,14 +2312,36 @@ def import_from_to(
         configuration (suppressed_in): a component added in one configuration shows in all.
     The assembly is rebuilt out-of-date-only afterwards (no ForceRebuild3: that marked every
     loaded reference modified).
-    Returns imported, new_route, the route's wires and segments (see routing_status), steps."""
-    return _call("import_from_to", {
+    Returns imported, new_route, the route's wires and segments (see routing_status), steps.
+    compact=True: wires_count / segments_count / steps_count instead of the lists, keeping only
+    the wires with errors (with route_wires=False they are all not_routed: only counted)."""
+    params = {
         "from_to": from_to, "cable_library": cable_library, "component_library": component_library,
         "references": references, "convert_guidelines": convert_guidelines,
         "route_wires": route_wires, "use_existing_assembly": use_existing_assembly,
         "overwrite": overwrite, "search_sub_assemblies": search_sub_assemblies,
         "press_ok": press_ok, "route": route, "edit_route_first": edit_route_first,
-        "replaces": replaces, "configurations": configurations})
+        "replaces": replaces, "configurations": configurations}
+    if not compact:
+        return _call("import_from_to", params)
+    raw, pl = _call_json("import_from_to", params)
+    _compact_route_lists(pl, routed=route_wires)
+    return _text_with(raw, pl)
+
+
+def _compact_route_lists(pl: dict, routed: bool = True) -> None:
+    """Counts instead of the wire / segment / step lists of a route result (in place); wires with
+    errors are kept when the wires were routed."""
+    for holder in (pl, pl.get("route") if isinstance(pl.get("route"), dict) else None):
+        if holder is None:
+            continue
+        if routed:
+            _keep_problems(holder, "wires", lambda w: not w.get("errors"))
+        elif isinstance(holder.get("wires"), list):
+            holder["wires_count"] = len(holder.pop("wires"))
+        for key in ("segments", "steps"):
+            if isinstance(holder.get(key), list):
+                holder[f"{key}_count"] = len(holder.pop(key))
 
 
 @mcp.tool(structured_output=False)
@@ -2145,6 +2503,7 @@ def check_path_clearance(
     limit: Annotated[int, Field(ge=1)] = 50,
     keep_probe: bool = False,
     max_paths: Annotated[int, Field(ge=1)] = 24,
+    frame_component: str = "",
 ) -> str:
     """Is a candidate bundle path free in the ACTIVE ASSEMBLY, before any route or bundle part is
     drawn on it? Read-only for the model: builds the path as a circular-profile tube (same
@@ -2168,7 +2527,22 @@ def check_path_clearance(
     Each path is its own body; a path whose sweep fails is left out and listed in unswept_paths
     (then clear=false). Keep probes small: more than max_paths paths are refused (30 fan legs
     meeting at one join once crashed SOLIDWORKS in the interference check). Probe a fan's outer
-    legs and its bundle, not every leg."""
+    legs and its bundle, not every leg.
+    frame_component: the points are in THIS component's coordinates (an instance path of the
+    active assembly, e.g. a sub-assembly holding a route: route plans are in its frame); they are
+    mapped to the active assembly before the check (result frame_component, frame_transform).
+    Reported boxes and positions are in the active assembly's coordinates."""
+    if frame_component.strip():
+        t = _component_transforms([frame_component])[frame_component]["transform"]
+        try:
+            pts = json.loads(points or "[]")
+            plist = json.loads(paths or "[]")
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"check_path_clearance: points / paths not JSON: {exc}") from exc
+        points = json.dumps([am.xf_point(t, q) for q in pts])
+        for p in plist:
+            p["points"] = [am.xf_point(t, q) for q in p.get("points") or []]
+        paths = json.dumps(plist)
     params = {
         "points": points, "diameter": diameter, "bend_radius": bend_radius,
         "bend_radii": bend_radii, "paths": paths, "clearance": clearance, "ignore": ignore,
@@ -2176,7 +2550,197 @@ def check_path_clearance(
         "limit": limit, "keep_probe": keep_probe}
     if max_paths != 24:
         params["max_paths"] = max_paths
-    return _call("check_path_clearance", params)
+    text = _call("check_path_clearance", params)
+    if frame_component.strip():
+        text += f" | frame_component={frame_component} | frame_transform={json.dumps(t)}"
+    return text
+
+
+def _route_path_params(route: str, *, dry_run: bool, fan_out: list, paths: list,
+                       max_kink_deg: float = 15.0) -> dict:
+    params = {"route": route, "points": "[]", "bend_radius": 0.0, "bend_radii": "[]",
+              "add_cpoints": "[]", "exit_route": True, "route_wires": True,
+              "snap_tolerance": 0.0005, "merge_tolerance": 1e-5, "dry_run": dry_run,
+              "allow_free_ends": False, "free_end_tolerance": 0.0005, "min_corner_deg": 10.0}
+    if max_kink_deg != 15.0:
+        params["max_kink_deg"] = max_kink_deg
+    if fan_out:
+        params["fan_out"] = json.dumps(fan_out)
+    if paths:
+        params["paths"] = json.dumps(paths)
+    return params
+
+
+@mcp.tool(structured_output=False)
+def route_follow(
+    route: str,
+    plan: str,
+    from_to: str = "",
+    cable_library: str = "",
+    reimport: bool = True,
+    draw: bool = False,
+    configurations: str = "[]",
+    lead_points: str = "{}",
+    max_move: Annotated[float, Field(gt=0)] = 0.02,
+    coverings_path: str = "",
+    plan_out: str = "",
+    status_path: str = "",
+    csv_path: str = "",
+    compare_to: str = "",
+    csv_note: str = "",
+    max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0,
+) -> str:
+    """Redraw a route after its connectors moved, keeping its bundle plan (adapter-side; changes
+    the model unless reimport=False and draw=False). The ACTIVE assembly holds the route.
+    plan: JSON {fan_out: [...], paths: [{name, points (m), bend_radii | bend_radius}, ...]} as
+    route_path takes them, inline or a .json file path (route_path's frame: the active assembly).
+    1. reimport: export the coverings (coverings_path; an existing file is kept when the route
+       has none), import_from_to(from_to, cable_library, replaces=route, route_wires=False,
+       configurations): new stubs at the connectors' current places; the new route is used next.
+    2. Follow: every FREE path end (one no other path shares: breakouts stay) moves onto the
+       nearest stub end of the route's own wire ends (routing_status stub check; fan_out
+       connectors excluded) or fan_out join (from a dry run), with its lead point(s) by the same
+       vector. lead_points: {"<path>.start" | "<path>.end": n} (default 1). Ends with nothing
+       within max_move (m) stay; `ambiguous` when the second candidate is almost as near.
+       The followed plan is written to plan_out (default next to the plan file:
+       <name>.followed.json; inline plans go to the temp folder).
+    3. Dry run of the followed plan: sharp_junctions, cycle_count, no_room (paths whose
+       min_straight_mm < 0.2: corners too close for their radii), junctions over max_kink_deg - 1.
+    4. draw=True and the dry run clean: draw it, re-apply the coverings, routing_status (wires,
+       errors, max kink, detached stubs); status_path: the full status JSON; csv_path /
+       compare_to / csv_note: the wire table as routing_status writes it.
+    Usual loop: reimport=True, draw=False; fix plan_out by hand where the summary shows a
+    problem; then route=<new_route>, plan=<plan_out>, reimport=False, draw=True. Returns a short
+    summary (moves, dry run, draw, coverings, status). A draw on a large assembly can take
+    minutes: run it with start_job."""
+    try:
+        plan_obj = am.load_json_arg(plan, "plan")
+        leads = am.load_json_arg(lead_points, "lead_points") or {}
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ToolError(f"route_follow: {exc}") from exc
+    if not isinstance(plan_obj, dict) or not plan_obj.get("paths"):
+        raise ToolError("route_follow: plan needs {paths: [...]} (and fan_out if the route has fans)")
+    if os.path.isfile(plan.strip()):
+        base = os.path.splitext(os.path.abspath(plan.strip()))[0]
+    else:
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in route)
+        folder = os.path.join(os.environ.get("TEMP") or os.getcwd(), "solidpilot_route_follow")
+        os.makedirs(folder, exist_ok=True)
+        base = os.path.join(folder, safe)
+    coverings_path = coverings_path.strip() or base + ".coverings.json"
+    plan_out = plan_out.strip() or base.removesuffix(".followed") + ".followed.json"
+    summary: dict = {"route": route}
+    fan_out = plan_obj.get("fan_out") or []
+
+    if reimport:
+        if not from_to.strip():
+            raise ToolError("route_follow: reimport needs from_to (and cable_library)")
+        tmp = coverings_path + ".new"
+        _, ex = _call_json("route_covering", {"route": route, "action": "export", "file_path": tmp,
+                                              "min_wires": 0, "name": "", "part_number": "",
+                                              "outer_diameter": 0.0})
+        n = int(ex.get("exported") or 0)
+        if n == 0 and os.path.isfile(coverings_path):
+            os.remove(tmp)
+            summary["coverings_exported"] = f"0 (kept {coverings_path})"
+        else:
+            os.replace(tmp, coverings_path)
+            summary["coverings_exported"] = n
+        _, im = _call_json("import_from_to", {
+            "from_to": from_to, "cable_library": cable_library, "component_library": "",
+            "references": "{}", "convert_guidelines": False, "route_wires": False,
+            "use_existing_assembly": True, "overwrite": True, "search_sub_assemblies": True,
+            "press_ok": 3, "route": "", "edit_route_first": False, "replaces": route,
+            "configurations": configurations})
+        if not im.get("imported") or not im.get("new_route"):
+            raise ToolError(f"route_follow: import failed: {json.dumps({k: im.get(k) for k in ('imported', 'warnings', 'steps')})[:1500]}")
+        route = im["new_route"]
+        summary["import"] = {"new_route": route, "deleted_files": len(im.get("deleted_files") or []),
+                             "suppressed_in": im.get("suppressed_in"), "warnings": im.get("warnings")}
+
+    _, st = _call_json("routing_status", {"route": route, "verbose": False, "check_stubs": True,
+                                          "stub_tolerance_mm": 0.05})
+    sc = (st.get("route") or {}).get("stub_check") or {}
+    fan_names = {str(f.get("connector")) for f in fan_out}
+
+    def is_fan(comp: str) -> bool:
+        return comp in fan_names or comp.split("/")[-1] in fan_names
+
+    candidates = [(s["end"], [v / 1000.0 for v in s["stub_end_mm"]]) for s in sc.get("stubs") or []
+                  if isinstance(s.get("stub_end_mm"), list) and not is_fan(str(s.get("component", "")))]
+    if fan_out:
+        _, fd = _call_json("route_path", _route_path_params(route, dry_run=True, fan_out=fan_out,
+                                                             paths=[], max_kink_deg=max_kink_deg))
+        for f in fd.get("fan_out") or []:
+            if isinstance(f.get("join"), list):
+                candidates.append(("fan " + str(f.get("connector")), f["join"]))
+    summary["candidates"] = len(candidates)
+    if sc.get("detached_count"):
+        summary["detached_stubs"] = sc.get("detached")
+    if sc.get("not_found"):
+        summary["stubs_not_found"] = sc.get("not_found")
+
+    followed, moves = am.follow_plan(plan_obj, candidates, leads, max_move)
+    with open(plan_out, "w", encoding="utf-8") as fh:
+        json.dump(followed, fh, indent=1)
+    summary["plan_out"] = plan_out
+    summary["moves"] = [m for m in moves if m["move_mm"] > 0.001 or m.get("skipped") or m.get("ambiguous")]
+    summary["ends_unchanged"] = len(moves) - len(summary["moves"])
+
+    _, dry = _call_json("route_path", _route_path_params(route, dry_run=True, fan_out=fan_out,
+                                                         paths=followed["paths"], max_kink_deg=max_kink_deg))
+    no_room = [{"path": p.get("name"), "min_straight_mm": (p.get("geometry") or {}).get("min_straight_mm")}
+               for p in dry.get("paths") or []
+               if ((p.get("geometry") or {}).get("min_straight_mm") is not None
+                   and (p.get("geometry") or {}).get("min_straight_mm") < 0.2)]
+    near_limit = [j for j in dry.get("junctions") or [] if (j.get("kink_deg") or 0) > max_kink_deg - 1]
+    summary["dry_run"] = {"sharp_junctions": dry.get("sharp_junctions"), "cycle_count": dry.get("cycle_count"),
+                          "length_mm": dry.get("length_mm"), "no_room": no_room,
+                          "junctions_near_limit": near_limit[:12]}
+    clean = not dry.get("sharp_junctions") and not dry.get("cycle_count") and not no_room
+    if not draw:
+        summary["next"] = ("draw: route_follow(route=new route, plan=plan_out, reimport=False, draw=True)"
+                           if clean else "fix plan_out (see dry_run), then draw")
+        return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
+    if not clean:
+        summary["drawn"] = False
+        summary["reason"] = "dry run not clean: nothing drawn"
+        return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
+
+    _, dr = _call_json("route_path", _route_path_params(route, dry_run=False, fan_out=fan_out,
+                                                        paths=followed["paths"], max_kink_deg=max_kink_deg))
+    wires = dr.get("wires") or []
+    summary["drawn"] = {"wires": len(wires),
+                        "errors": [{"wire": w.get("name"), "errors": w.get("errors")} for w in wires if w.get("errors")],
+                        "sharp_bend_nodes": (dr.get("bends") or {}).get("sharp_bend_nodes"),
+                        "max_kink_deg": max((w.get("max_kink_deg") or 0) for w in wires) if wires else None}
+    if os.path.isfile(coverings_path):
+        _, cv = _call_json("route_covering", {"route": route, "action": "import", "file_path": coverings_path,
+                                              "min_wires": 0, "name": "", "part_number": "", "outer_diameter": 0.0})
+        summary["coverings"] = {"applied_segments": cv.get("applied_segments"),
+                                "unmatched_entries": cv.get("unmatched_entries"),
+                                "uncovered_segments": [[s.get("id"), s.get("wire_count")] for s in cv.get("uncovered_segments") or []
+                                                       if isinstance(s, dict)]}
+    params = {"route": route, "verbose": False, "check_stubs": True, "stub_tolerance_mm": 0.05}
+    if max_kink_deg != 15.0:
+        params["max_kink_deg"] = max_kink_deg
+    previous = _read_wire_csv(compare_to) if compare_to.strip() else {}
+    raw = _call_raw("routing_status", params)
+    map_response(raw)
+    full = _payload_of(raw)
+    if status_path.strip():
+        with open(status_path, "w", encoding="utf-8") as fh:
+            json.dump(full, fh, indent=1)
+    rw = (full.get("route") or {}).get("wires") or []
+    summary["status"] = {"wires": len(rw), "with_errors": sum(1 for w in rw if w.get("errors")),
+                         "max_kink_deg": max((w.get("max_kink_deg") or 0) for w in rw) if rw else None,
+                         "detached_stubs": ((full.get("route") or {}).get("stub_check") or {}).get("detached_count")}
+    if csv_path.strip():
+        rows, changed = _write_wire_csv(csv_path, rw, previous, csv_note)
+        summary["csv"] = {"path": csv_path, "rows": rows}
+        if compare_to.strip():
+            summary["csv"]["changed_over_1mm"] = changed
+    return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
 
 
 @mcp.tool(structured_output=False)
@@ -2260,6 +2824,7 @@ def route_covering(
     outer_diameter: Annotated[float, Field(ge=0)] = 0.0,
     color: str = "",
     file_path: str = "",
+    compact: bool = False,
 ) -> str:
     """Coverings (sleeving, tape, conduit) on the route segments of an electrical route in the
     ACTIVE assembly (IRouteProperty.CreateCovering / AddCovering, ICovering). Bumps state_version
@@ -2283,7 +2848,9 @@ def route_covering(
     read-only); after the redraw, 'import' (file_path) puts each covering back on every segment
     with the same wire set and reports applied_segments, unmatched_entries (wire sets the new
     route no longer has) and uncovered_segments (2+ wires, no covering: new wire sets to cover
-    with 'add')."""
+    with 'add').
+    compact=True: counts instead of lists (export: coverings_count; add / remove / import: the
+    segment lists as counts, unmatched_entries and uncovered_segments kept: they need action)."""
     params = {"route": route, "action": action, "min_wires": min_wires, "name": name,
               "part_number": part_number, "outer_diameter": outer_diameter}
     if file_path.strip():
@@ -2294,7 +2861,19 @@ def route_covering(
         params["wires"] = wires
     if color.strip():
         params["color"] = json.loads(color)
-    return _call("route_covering", params)
+    if not compact or action == "list":
+        return _call("route_covering", params)
+    raw, pl = _call_json("route_covering", params)
+    for key in ("coverings", "segments", "changed_segments", "steps"):
+        if isinstance(pl.get(key), list):
+            pl[f"{key}_count"] = len(pl.pop(key))
+    if isinstance(pl.get("uncovered_segments"), list):
+        pl["uncovered_segments"] = [
+            {k: s[k] for k in ("id", "wire_count", "length_mm") if k in s} if isinstance(s, dict) else s
+            for s in pl["uncovered_segments"]]
+    pl.pop("note_import", None)
+    pl.pop("note", None)
+    return _text_with(raw, pl)
 
 
 @mcp.tool(structured_output=False)

@@ -238,6 +238,11 @@ namespace SolidworksExecution.Services
                     var rj = ReadElectricalRoute(doc, asm, comp, p?.Value<double?>("max_kink_deg") ?? 15.0);
                     var terms = ParseTerminations(p?["terminations"]);
                     if (terms != null) ApplyTerminations(rj, terms);
+                    if (p?.Value<bool?>("check_stubs") ?? false)
+                    {
+                        try { rj["stub_check"] = RouteStubs(asm, comp, rj, p?.Value<double?>("stub_tolerance_mm") ?? 0.05); }
+                        catch (Exception ex) { rj["stub_check"] = new JObject { ["error"] = ex.Message }; }
+                    }
                     result["route"] = rj;
                 }
                 return ReadOnlyResponse(request, doc, result);

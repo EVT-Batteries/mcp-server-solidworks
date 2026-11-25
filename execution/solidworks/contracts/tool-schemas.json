@@ -464,7 +464,8 @@
     "include_mates": "boolean (optional, default false - read each component's mates: slow on a large assembly)",
     "limit": "integer (optional, default 500 — maximum entries listed)",
     "boxes": "boolean (optional, default false - world bounding box per component, box_mm)",
-    "time_budget_s": "number (optional, default 60, 0 = none - stop listing / mate scans after this many seconds, truncated=true)"
+    "time_budget_s": "number (optional, default 60, 0 = none - stop listing / mate scans after this many seconds, truncated=true)",
+    "fields": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): comma-separated keys kept per component)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, reference?, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached."
@@ -497,7 +498,8 @@
     "visible": "boolean (optional — true shows, false hides)",
     "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration)",
     "include_mates": "boolean (optional, default false - mates of each component in the report after the change)",
-    "time_budget_s": "number (optional, default 60 - bound on the mate scans of the report)"
+    "time_budget_s": "number (optional, default 60 - bound on the mate scans of the report)",
+    "compact": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): counts, failed changes only)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included unless include_mates=false], all_ok, note}."
@@ -526,7 +528,10 @@
    "params": {
     "component": "string (required — component instance name, Name2)",
     "transform_json": "string (optional — JSON array of 13 numbers: 3x3 rotation row-major + translation xyz (m) + scale)",
-    "fixed": "boolean (optional — true fixes, false floats; omitted keeps the state)"
+    "fixed": "boolean (optional — true fixes, false floats; omitted keeps the state)",
+    "world_transform": "string (optional; ADAPTER-SIDE: JSON 13 numbers or 3 (translation) in the active assembly's frame; converted to the parent's frame and set in the parent's document)",
+    "world_offset": "string (optional; ADAPTER-SIDE: JSON [dx,dy,dz] m, move in the active assembly's frame)",
+    "configurations": "string (optional; ADAPTER-SIDE: 'all' or JSON list: set in each configuration of the parent, read back per configuration)"
    }
   },
   "output": "→ see execution-response.json — CadState.Features holds a single JSON string {component, fixed, transform}."
@@ -845,7 +850,15 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "analysis_type": "string (required): 'components' | 'components_flat' (leaf occurrences across nesting levels, root-space transforms — wrapper flattening) | 'mates' | 'faces' | 'edges'",
-    "component": "string (required for faces/edges - the component's Name2, e.g. 'Shaft-1')"
+    "component": "string (required for faces/edges - the component's Name2, e.g. 'Shaft-1')",
+    "world": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): faces in the active assembly's coordinates)",
+    "kind": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): 'plane' | 'cylinder' | 'cone' | 'sphere' | 'other')",
+    "near": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): JSON [x,y,z] m: faces nearest first, with distance_mm)",
+    "within": "number (optional, default 0 = any; ADAPTER-SIDE (applied by the adapter to the execution server's result): max distance from near, m)",
+    "axis": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): JSON direction: cylinder axes parallel, plane normals along it)",
+    "axis_tol_deg": "number (optional, default 2; ADAPTER-SIDE (applied by the adapter to the execution server's result): angle tolerance for axis)",
+    "radius_min": "number (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): cylinder radius >= this, m)",
+    "radius_max": "number (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): cylinder radius <= this, m)"
    }
   },
   "output": "-> see execution-response.json - CadState.Features[0] = one consolidated JSON string"
@@ -927,7 +940,8 @@
     "limit": "integer (optional, default 100 - max interferences / violations listed)",
     "compact": "boolean (optional, default false - counts instead of long lists: not_measured_count + not_measured_neighbours, resolved_from_lightweight_count)",
     "ignore_same_parent": "boolean (optional, default false - leave out interferences / clearance violations whose components all share one parent sub-assembly; reported as ignored_same_parent)",
-    "boxes": "boolean (optional, default false - neighbours as [{component, box_mm}], world bounding boxes)"
+    "boxes": "boolean (optional, default false - neighbours as [{component, box_mm}], world bounding boxes)",
+    "group_by_pair": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): pairs [{components, count, total_mm3, max_mm3}] instead of interferences)"
    }
   },
   "output": "-> see execution-response.json - CadState.Features holds a single JSON string {assembly, checked, neighbours_checked?, neighbours? (not compact: instance paths), interference_count, interferences:[{components, volume_m3, volume_mm3, box_min?, box_max?, possible_only?}], interferences_truncated_at?, clearance?:{required_m, violation_count, violations:[{a, b, distance_m, distance_mm}], distances_mm? (not compact: every pair, null = not measured), nearest_m?, nearest_pair?, not_measured?}, lightweight_resolved?, resolved_from_lightweight?, lightweight_not_checked?, warning?, clear}."
@@ -949,7 +963,8 @@
     "ignore_same_parent": "boolean (optional, default false)",
     "limit": "integer (optional, default 50)",
     "keep_probe": "boolean (optional, default false - leave the probe component in the assembly)",
-    "max_paths": "integer (optional, default 24 - more paths in one probe are refused: split the call)"
+    "max_paths": "integer (optional, default 24 - more paths in one probe are refused: split the call)",
+    "frame_component": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): points / paths are in this component's frame, mapped to the active assembly first)"
    }
   },
   "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, unswept_paths?:[{path, error}], warning?, clear, probe_component?, note?, cleanup} ignored / ignored_hits / ignored_violations: hits of ignored components, located on the path like the others but left out of `clear`."
@@ -980,7 +995,10 @@
     "max_kink_deg": "number (optional, degrees, default 15 - a wire turning more than this at a node of its path (where its route segments meet, or a corner without an arc inside one) is listed in sharp_bends: SOLIDWORKS checks arcs only)",
     "csv_path": "string (optional, ADAPTER-SIDE, not sent to the execution server - with route: write the wire table (Wire, From, To, Spec, CutLength_mm, MinArcRadius_mm, MaxKink_deg, Errors[, TotalCutLength_mm]) to this CSV)",
     "compare_to": "string (optional, ADAPTER-SIDE - an earlier wire table CSV: adds Previous_mm / Delta_mm and lists the wires changed by more than 1 mm)",
-    "csv_note": "string (optional, ADAPTER-SIDE - a '# ' comment first line for the CSV)"
+    "csv_note": "string (optional, ADAPTER-SIDE - a '# ' comment first line for the CSV)",
+    "check_stubs": "boolean (optional, default false here, true from the adapter when route is given — route.stub_check: the connection points the wires use, offset_mm from the route sketch, detached ones)",
+    "stub_tolerance_mm": "number (optional, default 0.05 — offset above which a stub counts as detached)",
+    "compact": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): wires with problems only, segments / stubs as counts)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {routing:{addin_object, file_locations, from_to_headers}, document, routing_points?, routing_component?, route_manager?, is_route_assembly?, edit_target?, route_assemblies?, connectors?:[{component, reference?, connection_points[{name, pin, location_mm, direction, stub_mm, stub_end_mm}]}], route?:{component, wires[{name, from, to, cut_length_mm, segments, errors?, wire_name, color, diameter_mm, max_kink_deg, min_arc_radius_mm?, sharp_bends?[{at_mm, kink_deg, where}], termination?{from, to}, total_cut_length_mm?}], bends:{max_kink_deg_allowed, sharp_bend_nodes, sharp_bends[{at_mm, kink_deg, where, wires}], note}, terminations?, terminations_missing?, cables_count, segments[{id, sketch_segments, length_mm, bend_radius_mm, bundle_diameter_mm}]}}"
@@ -1060,7 +1078,8 @@
     "route": "string (optional - route to use when the import makes no new one)",
     "edit_route_first": "boolean (optional, default false - EditRoute on 'route' before the import)",
     "replaces": "string (optional - route sub-assembly deleted before the import, its Harness_<n> files after)",
-    "configurations": "string or array (optional - JSON list: configurations showing the new route; the first is active for the import, the route is suppressed in the others)"
+    "configurations": "string or array (optional - JSON list: configurations showing the new route; the first is active for the import, the route is suppressed in the others)",
+    "compact": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): counts instead of wires / segments / steps)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {imported, new_route?, route?:{component, wires, cables_count, segments}, route_assemblies, steps, warnings?} With replaces: deleted_files. With configurations: suppressed_in, active_configuration."
@@ -1147,7 +1166,8 @@
     "name": "string (optional - covering name)",
     "part_number": "string (optional - covering part number)",
     "outer_diameter": "number (add: required, meters - covered outside diameter)",
-    "color": "array (optional - [r, g, b])"
+    "color": "array (optional - [r, g, b])",
+    "compact": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): counts instead of segment / covering lists)"
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {route, segments[{id, length_mm, wires, added?, removed?, replaced?, has_covering, covering?{name, part_number, outer_diameter_mm, color}}] (export: no segments; file_path, exported, coverings), note, steps, warnings?; import: applied_segments, unmatched_entries[{wires, part_number}], uncovered_segments[{id, length_mm, wire_count, wires}]}"
@@ -1177,5 +1197,48 @@
    }
   },
   "output": "-> see execution-response.json - Features[0] = JSON {steps, route_assemblies}"
+ },
+ "seat_on_stud": {
+  "description": "ADAPTER-SIDE (analyze_assembly faces of the ring part, the stud part and the face part, then place_component world_offset when apply): moves a ring terminal so its hole is coaxial with the nearest parallel stud and its contact face lies on the terminal face (rotation kept).",
+  "input": {
+   "params": {
+    "component": "string (required — the ring part, instance path)",
+    "stud_component": "string (required — the part carrying the stud)",
+    "face_component": "string (optional — the part with the terminal face, default stud_component)",
+    "stud_radius_min": "number (optional, m)",
+    "stud_radius_max": "number (optional, m)",
+    "face_index": "integer (optional, default -1 = automatic)",
+    "gap": "number (optional, default 0, m — space between contact face and terminal face)",
+    "search": "number (optional, default 0.015 m — max stud axis offset and face distance along the axis)",
+    "face_reach": "number (optional, default 0.04 m — terminal face mid point to stud axis)",
+    "apply": "boolean (optional, default false — move the part)",
+    "configurations": "string (optional — as place_component)"
+   }
+  },
+  "output": "COMPLETED | seat_on_stud | {delta_mm, move_mm, stud, hole, face, contact_face, other_faces, placed?}"
+ },
+ "route_follow": {
+  "description": "ADAPTER-SIDE (route_covering export, import_from_to replaces, routing_status check_stubs, route_path dry runs and draw, route_covering import, routing_status): redraws a route after its connectors moved, moving the free ends of the bundle plan onto the new stub ends / fan joins.",
+  "input": {
+   "params": {
+    "route": "string (required — the route sub-assembly)",
+    "plan": "string (required — JSON {fan_out, paths} or a .json file path)",
+    "from_to": "string (required with reimport — from-to .xlsx)",
+    "cable_library": "string (optional — cable library XML)",
+    "reimport": "boolean (optional, default true)",
+    "draw": "boolean (optional, default false)",
+    "configurations": "string (optional, default '[]' — as import_from_to)",
+    "lead_points": "string (optional, default '{}' — {\"<path>.start|end\": n})",
+    "max_move": "number (optional, default 0.02 m)",
+    "coverings_path": "string (optional — coverings JSON, default next to the plan)",
+    "plan_out": "string (optional — followed plan, default <plan>.followed.json)",
+    "status_path": "string (optional — full routing_status JSON after the draw)",
+    "csv_path": "string (optional — wire table CSV after the draw)",
+    "compare_to": "string (optional — earlier wire table CSV)",
+    "csv_note": "string (optional — '# ' first line of the CSV)",
+    "max_kink_deg": "number (optional, default 15)"
+   }
+  },
+  "output": "COMPLETED | route_follow | {route, import?, candidates, moves, dry_run, drawn?, coverings?, status?, csv?}"
  }
 }
