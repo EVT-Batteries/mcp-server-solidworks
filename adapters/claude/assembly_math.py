@@ -203,6 +203,35 @@ def line_distance(p, origin, direction) -> float:
     return norm(sub(v, scale(d, dot(v, d))))
 
 
+def hole_centre(lug_faces: list, parallel_tol_deg: float = 3.0) -> list | None:
+    """A point on the axis of a ring part's hole (the cylinder perpendicular to its largest flat
+    face that lies nearest that face's mid point), or None."""
+    cos_tol = math.cos(math.radians(parallel_tol_deg))
+    planes = [
+        f
+        for f in lug_faces
+        if f.get("planar")
+        and isinstance(f.get("normal"), list)
+        and isinstance(f.get("point"), list)
+    ]
+    if not planes:
+        return None
+    ring = max(planes, key=lambda f: f.get("area") or 0)
+    n = unit(ring["normal"])
+    holes = [
+        f
+        for f in lug_faces
+        if f.get("kind") == "cylinder"
+        and isinstance(f.get("axis"), list)
+        and isinstance(f.get("origin"), list)
+        and abs(dot(unit(f["axis"]), n)) >= cos_tol
+    ]
+    if not holes:
+        return None
+    h = min(holes, key=lambda f: line_distance(ring["point"], f["origin"], f["axis"]))
+    return list(h["origin"])
+
+
 def seat_on_stud(
     lug_faces: list,
     stud_faces: list,

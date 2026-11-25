@@ -480,7 +480,11 @@ def analyze_assembly(
     axis_distance_mm (cylinder: near to its axis line) or plane_distance_mm (plane: signed, along
     its normal). axis: JSON [dx,dy,dz]: cylinders whose axis is parallel (either sense) and planes
     whose normal points along it, within axis_tol_deg. radius_min / radius_max (m): cylinders by
-    radius. The result keeps faces_total and filters. Ring terminal on a stud: seat_on_stud."""
+    radius. The result keeps faces_total and filters. Ring terminal on a stud: seat_on_stud.
+    Speed: faces are cached per file and configuration (face_cache: hit / listed). The first
+    read of a large part lists its faces (~30 ms each: 1.5 min for 2,900 faces); give near +
+    within (and kind / radius) so only the faces there get full records. Later reads of any
+    instance of that file are fast."""
     params = {"analysis_type": analysis_type}
     if component:
         params["component"] = component
@@ -492,6 +496,17 @@ def analyze_assembly(
     for name, v in (("near", near_p), ("axis", axis_v)):
         if v is not None and len(v) != 3:
             raise ToolError(f"analyze_assembly: {name} needs 3 numbers")
+    pre: dict = {}
+    if near_p is not None and within:
+        pre.update(near=near_p, within=within, frame="assembly" if world else "component")
+    if kind:
+        pre["kind"] = kind
+    if radius_min:
+        pre["radius_min"] = radius_min
+    if radius_max:
+        pre["radius_max"] = radius_max
+    if pre:
+        params["prefilter"] = json.dumps(pre)   # cheap server-side pass; exact filter below
     raw, pl = _call_json("analyze_assembly", params)
     faces = pl.get("faces") or []
     if world:
@@ -946,9 +961,14 @@ def _place_world(component: str, world_transform, world_offset, configurations: 
     return report
 
 
-def _world_faces(component: str) -> tuple:
-    """(faces in the active assembly's coordinates, component transform)."""
-    _, pl = _call_json("analyze_assembly", {"analysis_type": "faces", "component": component})
+def _world_faces(component: str, prefilter: dict | None = None) -> tuple:
+    """(faces in the active assembly's coordinates, component transform). prefilter: the
+    execution server's cheap face filter (near / within in the active assembly's frame, kind,
+    radius_min / max), so a part with thousands of faces answers in seconds."""
+    params = {"analysis_type": "faces", "component": component}
+    if prefilter:
+        params["prefilter"] = json.dumps(dict(prefilter, frame="assembly"))
+    _, pl = _call_json("analyze_assembly", params)
     t = pl.get("transform")
     if not isinstance(t, list) or len(t) < 12:
         raise ToolError(f"analyze_assembly gave no transform for '{component}'")
@@ -986,9 +1006,20 @@ def seat_on_stud(
     (place_component world_offset, in each of `configurations` as there) and adds `placed`."""
     try:
         lug_faces, _ = _world_faces(component)
-        stud_faces, _ = _world_faces(stud_component)
+        centre = am.hole_centre(lug_faces)
+        if centre is None:
+            raise ValueError("no hole found in the component (cylinder perpendicular to its largest flat face)")
+        # Only faces whose box comes within reach of the hole are read in full (a relay model has
+        # 2,890 faces: reading them all took 6-10 min per part).
+        reach = search + 0.005
+        stud_pre = {"near": centre, "within": reach, "kind": "cylinder"}
+        if stud_radius_min:
+            stud_pre["radius_min"] = stud_radius_min
+        if stud_radius_max:
+            stud_pre["radius_max"] = stud_radius_max
+        stud_faces, _ = _world_faces(stud_component, stud_pre)
         fc = face_component.strip() or stud_component
-        face_faces = stud_faces if fc == stud_component else _world_faces(fc)[0]
+        face_faces, _ = _world_faces(fc, {"near": centre, "within": reach, "kind": "plane"})
         res = am.seat_on_stud(lug_faces, stud_faces, stud_component, face_faces, fc,
                               stud_radius_min=stud_radius_min, stud_radius_max=stud_radius_max,
                               face_index=face_index, gap=gap, search=search, face_reach=face_reach)

@@ -407,3 +407,15 @@ the move completed. The controller now keeps the last 64 responses by operation 
 (`GET /api/tool/result/{operationId}`: done / running / unknown) and the adapter, on a timeout,
 polls it until the call finishes (`TIMEOUT_RECOVER_WAIT`, default 1800 s) and returns the real
 result (`recovered_after_timeout_s`). Tested live with 1 s waits: recovered after 6.2 s.
+
+Same session, later: **face cache.** `seat_on_stud` took 7-10 min per lug on a relay model
+(2,890 faces). Latency probe (C# via `Add-Type`, Windows PowerShell 5.1): calls returning numbers
+cost 2-6 ms, every COM object handed across processes 20-30 ms (`IBody2.GetFaces` of the whole
+part 93 s, `IGetSurface` 23 ms; a full face record in assembly context ~195 ms). Fix
+(`Services/SolidWorksService.FaceCache.cs`, `FaceFilter.cs`): `analyze_assembly(faces)` keeps per
+(file, referenced configuration) the face list with boxes, checked against
+`IModelDoc2.GetUpdateStamp()`, builds full records only for faces a query reaches (`prefilter`:
+near / within / frame / kind / radius, sent by the adapter) and keeps them. Measured: first lug
+on a relay 198 s (was 590), next lugs on the same file 35-56 s (were 7-10 min); cache hits take
+milliseconds in the server. Open: the listing itself (93 s for 2,890 faces) is the floor of a
+first read; a disk cache keyed by file path + save time would carry it across server restarts.

@@ -397,7 +397,7 @@ namespace SolidworksExecution.Services
         // from this read selects the same entity in add_mate. The component's transform is
         // included so the caller can map coordinates between part and assembly space.
         private JObject ReadComponentEntities(IAssemblyDoc asm, string componentName, bool faces,
-            out string errCode, out string errMsg)
+            out string errCode, out string errMsg, FaceFilter filter = null, bool useFaceCache = true)
         {
             errCode = null; errMsg = null;
             var comp = FindComponentByName(asm, componentName);
@@ -410,6 +410,7 @@ namespace SolidworksExecution.Services
             // A lightweight component has no bodies: load it (reported in the result).
             comp = ResolveForGeometry(asm, comp, out errCode, out errMsg);
             if (comp == null) return null;
+            filter?.ToComponentFrame(comp);
             var root = new JObject();
             root["component"] = comp.Name2;
             AddAutoResolved(root);
@@ -417,6 +418,23 @@ namespace SolidworksExecution.Services
             if (t != null) root["transform"] = t;
             var arr = new JArray();
             int idx = 0;
+            if (faces)
+            {
+                arr = FilteredFaceRecords(comp, filter, useFaceCache, out int total,
+                    out string cacheStatus, out double listS, out int built);
+                root["face_count"] = total;
+                root["faces"] = arr;
+                root["face_cache"] = new JObject
+                {
+                    ["status"] = cacheStatus, ["list_s"] = listS, ["records_built"] = built,
+                };
+                if (filter != null)
+                {
+                    root["prefiltered"] = filter.Describe();
+                    root["faces_returned"] = arr.Count;
+                }
+                return root;
+            }
             object info;
             object[] bodies = comp.GetBodies3((int)swBodyType_e.swSolidBody, out info) as object[];
             if (bodies != null)
@@ -433,7 +451,11 @@ namespace SolidworksExecution.Services
                         {
                             var face = f as IFace2;
                             if (face == null) continue;
-                            arr.Add(BuildFaceJson(face, idx++));
+                            int fi = idx++;
+                            // Cheap tests first (box, surface type, radius): building the full
+                            // record (area, mid point) for each of 2,890 faces took 6-10 min.
+                            if (filter != null && !filter.Accepts(face)) continue;
+                            arr.Add(BuildFaceJson(face, fi));
                         }
                     }
                     else
@@ -449,7 +471,12 @@ namespace SolidworksExecution.Services
                     }
                 }
             }
-            root[faces ? "face_count" : "edge_count"] = arr.Count;
+            root[faces ? "face_count" : "edge_count"] = faces ? idx : arr.Count;
+            if (faces && filter != null)
+            {
+                root["prefiltered"] = filter.Describe();
+                root["faces_returned"] = arr.Count;
+            }
             root[faces ? "faces" : "edges"] = arr;
             return root;
         }
@@ -563,7 +590,9 @@ namespace SolidworksExecution.Services
                             "MISSING_PARAMETER",
                             $"analysis_type='{analysisType}' requires 'component' (Name2 from analyze_assembly(components), e.g. 'Shaft-1').");
                     string errCode, errMsg;
-                    var res = ReadComponentEntities(asm, componentName, analysisType == "faces", out errCode, out errMsg);
+                    var res = ReadComponentEntities(asm, componentName, analysisType == "faces", out errCode, out errMsg,
+                        analysisType == "faces" ? FaceFilter.FromParams(p) : null,
+                        p?.Value<bool?>("face_cache") ?? true);
                     if (res == null)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), errCode, errMsg);
                     results.Add(res.ToString(Newtonsoft.Json.Formatting.None));

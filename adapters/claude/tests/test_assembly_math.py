@@ -224,3 +224,9 @@ def test_group_interferences():
     }
     assert len(am.group_interferences(items, 1)) == 1
     assert math.isclose(sum(x["total_mm3"] for x in g), 9.0)
+
+
+def test_hole_centre_is_the_ring_hole():
+    lug = _lug(0.05, 0.002, 0.003)
+    assert am.hole_centre(lug) == [0.05, 0.002, 0.003]  # not the barrel along X
+    assert am.hole_centre([lug[3]]) is None

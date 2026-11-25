@@ -433,6 +433,18 @@ Results are in `$r.cadState.features` (often one JSON string).
     transform, so a nested route works too).
   - `analyze_assembly(faces)` on a part with thousands of faces (a contactor model: 2,890)
     takes minutes: filter in the adapter, and cache what a script needs.
+- **COM cost is per object, not per call (measured 2026-11-25, large assembly open)**: a call
+  returning numbers costs 2-6 ms (`RevisionNumber`, `GetTitle`, `IFace2.GetBox`, `GetArea`), but
+  every COM object handed across processes costs ~20-30 ms (`IGetSurface` 23 ms; listing the
+  2,890 faces of one part with `IBody2.GetFaces` took 93 s; a full face record in assembly
+  context ~195 ms). Probe: a C# class compiled with `Add-Type` in Windows PowerShell 5.1 (-STA)
+  timing loops of single calls. So minimise objects, and reuse them:
+  `analyze_assembly(faces)` keeps a face cache per (file, referenced configuration), checked
+  against `IModelDoc2.GetUpdateStamp()` (`Services/SolidWorksService.FaceCache.cs`): a miss lists
+  the faces and their boxes once, full records are built only for the faces a query reaches
+  (`prefilter` {near, within, frame, kind, radius_min / max}, sent by the adapter's face filters
+  and `seat_on_stud`) and kept; any instance of the same file then answers without per-face COM
+  calls. The result reports `face_cache` {status hit / listed, list_s, records_built}.
 
 ## Committing
 
