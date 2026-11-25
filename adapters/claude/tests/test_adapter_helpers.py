@@ -4,6 +4,7 @@ import os
 import sys
 import time
 
+import httpx
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
@@ -88,3 +89,66 @@ def test_failed_job_raises(monkeypatch):
     job_id = server.start_job("boom").split("job_id=")[1].split(" |")[0]
     with pytest.raises(ToolError, match="SOLIDWORKS_BUSY"):
         server.job_status(job_id, wait_s=5)
+
+
+class _TimeoutThenResult:
+    """httpx.Client stand-in: POST times out, GET result/<op> answers from a script."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.gets = 0
+
+    def __call__(self, **kwargs):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def post(self, url, json=None):
+        raise httpx.ReadTimeout("slow")
+
+    def get(self, url):
+        self.gets += 1
+        status, body = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        return _Resp(status, body)
+
+
+class _Resp:
+    def __init__(self, status, body):
+        self.status_code = status
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def test_timeout_fetches_the_real_result(monkeypatch):
+    import execution_client as ec
+
+    done = {"status": "COMPLETED", "stateVersion": 7, "cadState": {"features": ["x"]}}
+    fake = _TimeoutThenResult([(200, {"state": "running"}), (200, {"state": "running"}),
+                               (200, {"state": "done", "response": done})])
+    monkeypatch.setattr(ec, "_http_client", fake)
+    monkeypatch.setattr(ec, "RECOVER_POLL_S", 0.0)
+    resp = ec.call_tool("place_component", "op-1", 6, {}, timeout=1)
+    assert resp["status"] == "COMPLETED" and resp["stateVersion"] == 7 and fake.gets == 3
+    assert "recovered_after_timeout_s=" in map_response(resp)
+
+
+def test_timeout_without_result_endpoint_still_fails(monkeypatch):
+    import execution_client as ec
+
+    monkeypatch.setattr(ec, "_http_client", _TimeoutThenResult([(404, {})]))
+    monkeypatch.setattr(ec, "RECOVER_POLL_S", 0.0)
+    with pytest.raises(ec.ExecutionLayerError, match="older build"):
+        ec.call_tool("place_component", "op-2", 6, {}, timeout=1)
+    monkeypatch.setattr(ec, "_http_client", _TimeoutThenResult([(200, {"state": "unknown"})]))
+    with pytest.raises(ec.ExecutionLayerError, match="does not know this call"):
+        ec.call_tool("place_component", "op-3", 6, {}, timeout=1)
+    monkeypatch.setattr(ec, "_http_client", _TimeoutThenResult([(200, {"state": "running"})]))
+    monkeypatch.setattr(ec, "TIMEOUT_RECOVER_WAIT", 0.0)
+    with pytest.raises(ec.ExecutionLayerError, match="still running"):
+        ec.call_tool("place_component", "op-4", 6, {}, timeout=1)

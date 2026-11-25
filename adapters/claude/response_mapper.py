@@ -40,6 +40,8 @@ def map_response(response: dict) -> str:
         result_geometry = response.get("result_geometry")
         if result_geometry is not None:
             text += f" | result_geometry={json.dumps(result_geometry)}"
+        if response.get("recoveredAfterTimeoutS") is not None:
+            text += f" | recovered_after_timeout_s={response['recoveredAfterTimeoutS']}"
         return text
 
     if status == "DUPLICATE":

@@ -13,8 +13,11 @@ from config import (
     EXECUTION_EXE_PATH,
     HEALTH_ENDPOINT,
     HTTP_TIMEOUT,
+    RECOVER_POLL_S,
+    RESULT_ENDPOINT,
     SERVER_SPAWN_TIMEOUT,
     STATE_ENDPOINT,
+    TIMEOUT_RECOVER_WAIT,
 )
 from mcp.server.mcpserver.exceptions import ToolError
 
@@ -230,14 +233,18 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     try:
         response = _request_with_autostart(_do, tool_name)
     except httpx.TimeoutException:
-        _log(f"<- {tool_name} TIMEOUT after {budget}s")
+        _log(f"<- {tool_name} TIMEOUT after {budget}s: waiting for its result")
+        recovered, why = recover_result(tool_name, operation_id)
+        if recovered is not None:
+            return recovered
         raise ExecutionLayerError(
-            f"TIMEOUT | {tool_name} got no answer from solidworks-execution within {budget:g} s. "
-            "SolidWorks is probably still working on it (calls run one at a time, so the next "
+            f"TIMEOUT | {tool_name} got no answer from solidworks-execution within {budget:g} s "
+            f"and its result could not be fetched afterwards ({why}). "
+            "SolidWorks may still be working on it (calls run one at a time, so the next "
             "call waits for it): wait, then check the result (verify_state, component_status, "
             "check_rebuild) before retrying, since a model-changing call may still complete. "
-            "Raise HTTP_TIMEOUT / LONG_HTTP_TIMEOUT in adapters/claude/.env for long calls, or "
-            "narrow the call (e.g. name the components)."
+            "Raise HTTP_TIMEOUT / LONG_HTTP_TIMEOUT / TIMEOUT_RECOVER_WAIT in "
+            "adapters/claude/.env for long calls, or narrow the call (e.g. name the components)."
         )
     except httpx.HTTPError as ex:
         _log(f"<- {tool_name} HTTP_ERROR {type(ex).__name__}: {ex}")
@@ -264,6 +271,50 @@ def call_tool(tool_name: str, operation_id: str, state_version: int, params: dic
     err = (body.get("error") or {}).get("code")
     _log(f"<- {tool_name} {body.get('status')}{(' ' + err) if err else ''} sv={body.get('stateVersion')}")
     return body
+
+
+def recover_result(tool_name: str, operation_id: str,
+                   wait_s: float | None = None) -> tuple[dict | None, str]:
+    """After an HTTP timeout: poll GET /api/tool/result/<operation id> until the call is done.
+
+    The execution server keeps running a call whose HTTP wait ended (the work is on its STA
+    thread) and stores the response of the last calls by operation id. Returns (response, "")
+    when the call finished within `wait_s` (default TIMEOUT_RECOVER_WAIT), else (None, reason):
+    the server has no such endpoint (older build) or does not know the call, or it is still
+    running when the wait ends."""
+    wait = TIMEOUT_RECOVER_WAIT if wait_s is None else wait_s
+    start = time.monotonic()
+    unknown = 0
+    while True:
+        try:
+            with _http_client(timeout=10) as client:
+                r = client.get(f"{RESULT_ENDPOINT}/{operation_id}")
+        except httpx.HTTPError as ex:
+            return None, f"result endpoint unreachable: {type(ex).__name__}"
+        if r.status_code == 404:
+            return None, "the execution server has no result endpoint (older build)"
+        try:
+            body = r.json() if r.status_code == 200 else {}
+        except ValueError:
+            body = {}
+        state = body.get("state")
+        elapsed = time.monotonic() - start
+        if state == "done" and isinstance(body.get("response"), dict):
+            resp = body["response"]
+            resp["recoveredAfterTimeoutS"] = round(elapsed, 1)
+            err = (resp.get("error") or {}).get("code")
+            _log(f"<- {tool_name} {resp.get('status')}{(' ' + err) if err else ''} "
+                 f"(fetched {elapsed:.0f} s after the timeout)")
+            return resp, ""
+        if state == "unknown":
+            unknown += 1
+            if unknown >= 3:
+                return None, "the execution server does not know this call (restarted?)"
+        else:
+            unknown = 0
+        if elapsed >= wait:
+            return None, f"still running after {wait:g} s more (state {state})"
+        time.sleep(RECOVER_POLL_S)
 
 
 def ensure_ready() -> dict:

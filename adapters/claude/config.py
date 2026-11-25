@@ -15,11 +15,17 @@ EXECUTION_BASE_URL = os.getenv("EXECUTION_BASE_URL", "http://localhost:5000")
 EXECUTE_ENDPOINT = f"{EXECUTION_BASE_URL}/api/tool/execute"
 STATE_ENDPOINT = f"{EXECUTION_BASE_URL}/api/tool/state"
 HEALTH_ENDPOINT = f"{EXECUTION_BASE_URL}/health"
+RESULT_ENDPOINT = f"{EXECUTION_BASE_URL}/api/tool/result"
 ENSURE_ENDPOINT = f"{EXECUTION_BASE_URL}/ensure_ready"
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 # Tools that walk a whole assembly (mates, interference, rebuild checks, imports) can take minutes
 # on a large assembly; they get this budget instead (see LONG_TOOLS in server.py).
 LONG_HTTP_TIMEOUT = float(os.getenv("LONG_HTTP_TIMEOUT", "900"))
+# When a call's HTTP wait ends first, SolidWorks still finishes it: the adapter then polls the
+# server's result store (GET /api/tool/result/<operation id>) for up to this many seconds and
+# returns the real result instead of a TIMEOUT error.
+TIMEOUT_RECOVER_WAIT = float(os.getenv("TIMEOUT_RECOVER_WAIT", "1800"))
+RECOVER_POLL_S = float(os.getenv("RECOVER_POLL_S", "2"))
 # ensure_ready may cold-launch SolidWorks, which can take tens of seconds — give it room.
 ENSURE_TIMEOUT = float(os.getenv("ENSURE_TIMEOUT", "120"))
 # The CONNECT phase gets its own budget, deliberately NOT derived from the timeouts above.

@@ -400,3 +400,10 @@ filters, `group_by_pair`, `frame_component`. The first `seat_on_stud` picked a f
 side of the lug (one "up" direction for every candidate): each candidate face is now paired with
 the lug face looking at it. Not yet run: `route_follow` with `reimport` / `draw` (its steps are
 the tools the drivers it replaces called).
+
+Same session, later: **false TIMEOUTs removed.** A `place_component` run by `seat_on_stud` in a
+~1000-component assembly took over the 30 s `HTTP_TIMEOUT`: the tool reported TIMEOUT although
+the move completed. The controller now keeps the last 64 responses by operation id
+(`GET /api/tool/result/{operationId}`: done / running / unknown) and the adapter, on a timeout,
+polls it until the call finishes (`TIMEOUT_RECOVER_WAIT`, default 1800 s) and returns the real
+result (`recovered_after_timeout_s`). Tested live with 1 s waits: recovered after 6.2 s.

@@ -30,6 +30,15 @@ description: >-
   `swResponding` stays false ask the user to clear or restart SolidWorks. SolidWorks writes a
   hang dump under `%LOCALAPPDATA%\SOLIDWORKS\CXPD\<session>\` and shows its own "reported an
   issue" prompt.
+- **Timeouts are recovered, not reported (2026-11-25)**: the controller keeps the response of
+  the last 64 calls by operation id (read-only ones too) and marks calls in progress;
+  `GET /api/tool/result/{operationId}` answers `done` (with the response), `running` or
+  `unknown`. When an HTTP wait ends first (`HTTP_TIMEOUT` 30 s for short tools: a
+  `place_component` inside a large assembly took longer), `execution_client.call_tool` polls
+  that endpoint every `RECOVER_POLL_S` for up to `TIMEOUT_RECOVER_WAIT` (default 1800 s) and
+  returns the real result, marked `recovered_after_timeout_s`. It still fails (TIMEOUT, with
+  the reason) on an older server (404), an unknown call (server restarted) or a call still
+  running at the end of the wait.
 - **Contract** `execution/solidworks/contracts/tool-schemas.json`: one entry per tool;
   `adapters/claude/tests/test_schema_contract.py` fails on any drift between it and `server.py`.
 - **state_version**: every request carries it and must match the server's (`GET /api/tool/state`).

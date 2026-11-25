@@ -131,6 +131,51 @@ namespace SolidworksExecution.Controllers
             return Request.CreateResponse(HttpStatusCode.OK, info);
         }
 
+        // Results of the last calls by operation id, also read-only ones, so a caller whose HTTP wait
+        // ended before SolidWorks finished (the call keeps running on the STA thread) can fetch the
+        // real result instead of guessing: GET api/tool/result/{operationId}.
+        private const int RecentResultsKept = 64;
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ExecutionResponse> _recent =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, ExecutionResponse>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> _running =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>();
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<string> _recentOrder =
+            new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        private static void Remember(string operationId, ExecutionResponse response)
+        {
+            DateTime started;
+            _running.TryRemove(operationId, out started);
+            if (response == null) return;
+            _recent[operationId] = response;
+            _recentOrder.Enqueue(operationId);
+            string old;
+            ExecutionResponse gone;
+            while (_recentOrder.Count > RecentResultsKept && _recentOrder.TryDequeue(out old))
+                _recent.TryRemove(old, out gone);
+        }
+
+        // state: "done" (with the response the call returned), "running" (accepted, not finished:
+        // waiting for or holding the SolidWorks worker) or "unknown" (never seen, or older than the
+        // last 64 calls, or the server restarted).
+        [HttpGet]
+        [Route("result/{operationId}")]
+        public HttpResponseMessage GetResult(string operationId)
+        {
+            ExecutionResponse response;
+            if (_recent.TryGetValue(operationId ?? "", out response))
+                return Request.CreateResponse(HttpStatusCode.OK, new { state = "done", response });
+            DateTime started;
+            if (_running.TryGetValue(operationId ?? "", out started))
+                return Request.CreateResponse(HttpStatusCode.OK, new
+                {
+                    state = "running",
+                    runningSinceUtc = started.ToString("o"),
+                    swResponding = SolidWorksResponding(),
+                });
+            return Request.CreateResponse(HttpStatusCode.OK, new { state = "unknown" });
+        }
+
         [HttpPost]
         [Route("execute")]
         public HttpResponseMessage Execute([FromBody] ToolRequest request)
@@ -138,7 +183,23 @@ namespace SolidworksExecution.Controllers
             if (request == null || string.IsNullOrEmpty(request.OperationId) || string.IsNullOrEmpty(request.Tool))
                 return Request.CreateResponse(HttpStatusCode.BadRequest,
                     new { error = "operation_id and tool are required." });
+            _running[request.OperationId] = DateTime.UtcNow;
+            try
+            {
+                var msg = ExecuteCore(request, out var stored);
+                Remember(request.OperationId, stored);
+                return msg;
+            }
+            catch
+            {
+                Remember(request.OperationId, null);
+                throw;
+            }
+        }
 
+        private HttpResponseMessage ExecuteCore(ToolRequest request, out ExecutionResponse stored)
+        {
+            stored = null;
             ExecLog.Write($"-> {request.Tool} op={request.OperationId} sv={request.StateVersion}");
 
             ExecutionResponse response;
@@ -158,14 +219,15 @@ namespace SolidworksExecution.Controllers
                              " This call was NOT run. Wait for that call to finish (or, if SolidWorks is " +
                              "hung, ask the user to clear it), then check the state before retrying.";
                 ExecLog.Write($"<- {request.Tool} FAILED SOLIDWORKS_BUSY: {msg}");
-                return Request.CreateResponse(HttpStatusCode.OK, new ExecutionResponse
+                stored = new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "FAILED",
                     Verified = false,
                     StateVersion = _guard.GetCurrentStateVersion(),
                     Error = new ExecutionError { Code = "SOLIDWORKS_BUSY", Message = msg }
-                });
+                };
+                return Request.CreateResponse(HttpStatusCode.OK, stored);
             }
             catch (System.Exception ex)
             {
@@ -186,6 +248,7 @@ namespace SolidworksExecution.Controllers
             else
                 ExecLog.Write($"<- {request.Tool} {response.Status} sv={response.StateVersion}");
 
+            stored = response;
             return Request.CreateResponse(HttpStatusCode.OK, response);
         }
 
