@@ -20,6 +20,9 @@ build steps and API lessons: [`.agents/skills/solidpilot-mcp-development/SKILL.m
 | `manage_configurations` | Lists, adds, activates, renames or deletes configurations, and sets their description and "suppress new components". |
 | `check_interference` | Interference detection (`InterferenceDetectionManager`) for named components against the leaf parts whose bounding box comes near them, or for the whole assembly: overlapping pairs with volume and overlap box. With `clearance`, the minimum distance (SolidWorks Measure) to each neighbour and every pair closer than it (an interfering pair counts as 0). |
 | `import_step` | STEP / IGES / Parasolid to a `.SLDPRT`: imports, saves, closes the import document and reopens the saved part, so part queries work at once; reports bodies and bounding box, refuses to overwrite unless asked. |
+| `occupancy_grid` | Read-only voxel occupancy (RLE) of a box region from real tessellated geometry (solid and surface bodies), with `frame_component`, `ignore`, Euclidean `dilate`, and `out_path` export. |
+| `plan_probe_sizes` | Walks a route's from-to wires through a bundle plan, sizes each path by a covering rule, and writes a probe file for `check_path_clearance(paths_file=...)`. |
+| `find_corridor` | Pure-Python bend-radius-feasible corridor planner (`corridor.py`) over an `occupancy_grid` (or saved `grid_file`), returning ranked filleted polylines and `probe_paths`. |
 
 Changes to upstream tools:
 - `insert_component` also inserts sub-assemblies (`.sldasm`). Its description now says that
@@ -47,7 +50,7 @@ Changes to upstream tools:
   Covered by `adapters/claude/tests/test_error_passing.py`.
 
 Each tool is registered in the contract (`tool-schemas.json`), the adapter and the README, and the
-adapter tests pass (58 tools).
+adapter tests pass (81 tools, 43 offline tests).
 
 ## Known limits
 
@@ -121,6 +124,21 @@ Most useful first:
 2b. **Interference per bundle segment.** `check_interference` works per component; for a long
    bundle, report where along the path a clearance violation is (closest points from Measure),
    so the route can be moved at the right corner.
+2c. **Corridor planner follow-ups (`find_corridor`).** Implemented in `adapters/claude/corridor.py`
+    with `occupancy_grid`. Remaining: support per-corner radii or multi-branch junctions, and test
+    whether `IComponent2.GetTessTriangles` returns data for lightweight components in large-assembly
+    mode and whether `IPartDoc.GetTessTriangles` covers hidden/surface-only bodies without falling
+    back to per-face tessellation.
+2d. **Region boxes follow-ups (`component_status(region)`).** Server-side `region` /
+    `region_frame_component` / `leaves_only` and the per-assembly `box_cache` are implemented.
+    Remaining: verify whether moving nested components always bumps the top assembly's
+    `GetUpdateStamp()`, and consider sharing the tessellation/box cache with face queries.
+2e. **Sized probes follow-ups (`plan_probe_sizes` + `check_path_clearance`).** `plan_probe_sizes`,
+    `paths_file` / `names`, `path_name`, and automatic batching over `max_paths` are implemented.
+    Remaining: also create graph nodes where a branch starts partway along another path (today only
+    path endpoints are graph nodes).
+2f. **Draw timings follow-ups (`route_follow` `timings_s`).** Per-step `timings_s` is implemented.
+    Remaining: add an `open_documents` count if a cheap existing server call reports it.
 3. **Route by named points.** Feed `create_3d_path` named points (a connection-point table), or
    anchor routes to sketch points or reference points on the connector components, so that
    moving a part updates its routes without redrawing.

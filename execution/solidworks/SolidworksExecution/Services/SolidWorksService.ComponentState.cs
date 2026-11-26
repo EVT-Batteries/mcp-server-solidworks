@@ -62,11 +62,31 @@ namespace SolidworksExecution.Services
                 double budget = p?.Value<double?>("time_budget_s") ?? 60;
                 var deadline = budget > 0 ? DateTime.UtcNow.AddSeconds(budget) : DateTime.MaxValue;
 
+                bool hasRegion = p?["region"] != null && p["region"].Type != JTokenType.Null
+                    && !(p["region"].Type == JTokenType.String && ((string)p["region"]).Trim().Length == 0);
+                string regionFrame = (p?.Value<string>("region_frame_component") ?? "").Trim();
+                bool leavesOnly = p?.Value<bool?>("leaves_only") ?? false;
+
                 var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
                 var asm = modelDoc as IAssemblyDoc;
                 if (asm == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "WRONG_DOCUMENT_TYPE", "component_status requires an active assembly.");
+
+                // Region filter (world AABB of the region, mapped from region_frame_component):
+                // components are kept by their world box before any per-component record is built.
+                double[] region = null, regionWorld = null, regionFrameXf = null;
+                if (hasRegion)
+                {
+                    string rc, rm;
+                    if (!RegionToWorld(asm, p["region"], regionFrame, out region, out regionWorld, out regionFrameXf, out rc, out rm))
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), rc, rm);
+                    boxes = true;
+                }
+                // Component boxes per assembly, reused while its update stamp is unchanged.
+                string boxStatus = null;
+                Dictionary<string, double[]> boxCache = null;
+                if (boxes) boxCache = AssemblyBoxCache(modelDoc, out boxStatus);
 
                 // Mates are read per component by scanning every mate of the assembly and of each
                 // parent sub-assembly: minutes on a large assembly. Only on request.
@@ -77,6 +97,7 @@ namespace SolidworksExecution.Services
                 var counts = new JObject();
                 var missing = new JArray();
                 int total = 0;
+                int outsideRegion = 0;
                 if (wanted.Count > 0)
                 {
                     foreach (var n in wanted)
@@ -85,8 +106,40 @@ namespace SolidworksExecution.Services
                         if (c == null) { missing.Add(n); continue; }
                         total++;
                         if (DateTime.UtcNow > deadline) { truncated = true; break; }
-                        list.Add(ComponentStatusJson(c, includeMates, boxes, deadline));
+                        string cpath = boxes ? ComponentPath(c) : null;
+                        double[] cbox = boxes ? CachedComponentBox(boxCache, c, cpath) : null;
+                        if (hasRegion)
+                        {
+                            if (cbox == null || !BoxesWithin(cbox, regionWorld, 0)) { outsideRegion++; continue; }
+                            if (leavesOnly && HasChildren(c)) continue;
+                        }
+                        list.Add(ComponentStatusJson(c, includeMates, boxes, deadline, cpath, cbox, boxes));
                     }
+                }
+                else if (hasRegion)
+                {
+                    // Walk down from the top, pruning sub-assemblies whose box misses the region:
+                    // components outside it cost one GetBox (none on a box-cache hit).
+                    var kept = new List<RegionHit>();
+                    var noBox = new List<string>();
+                    if (asm.GetComponents(true) is object[] tops)
+                        foreach (var o in tops)
+                            RegionWalk(o as IComponent2, "", regionWorld, recursive, leavesOnly, boxCache, kept, noBox, ref total, deadline, ref truncated, 0);
+                    foreach (var h in kept)
+                    {
+                        string state = SuppressionName(h.C);
+                        if (!string.IsNullOrEmpty(match)
+                            && h.Path.IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0
+                            && SafeComponentPath(h.C).IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0)
+                            continue;
+                        if (!StateMatches(h.C, state, stateFilter)) continue;
+                        counts[state] = (counts.Value<int?>(state) ?? 0) + 1;
+                        if (list.Count >= limit) continue;
+                        if (DateTime.UtcNow > deadline) { truncated = true; break; }
+                        list.Add(ComponentStatusJson(h.C, includeMates, true, deadline, h.Path, h.Box, true));
+                    }
+                    outsideRegion = total - kept.Count;
+                    if (noBox.Count > 0) counts["no_box"] = noBox.Count;
                 }
                 else if (asm.GetComponents(!recursive) is object[] comps)
                 {
@@ -104,7 +157,7 @@ namespace SolidworksExecution.Services
                         if (!StateMatches(c, state, stateFilter)) continue;
                         if (list.Count >= limit) continue;
                         if (DateTime.UtcNow > deadline) { truncated = true; break; }
-                        list.Add(ComponentStatusJson(c, includeMates, boxes, deadline));
+                        list.Add(ComponentStatusJson(c, includeMates, boxes, deadline, path, null, false, boxCache));
                     }
                 }
 
@@ -115,6 +168,18 @@ namespace SolidworksExecution.Services
                     ["returned"] = list.Count,
                     ["components"] = list,
                 };
+                if (boxStatus != null) result["box_cache"] = boxStatus;
+                if (hasRegion)
+                {
+                    result["region"] = new JObject
+                    {
+                        ["region"] = new JArray(region),
+                        ["frame"] = regionFrameXf == null ? "world" : regionFrame,
+                        ["world_box"] = new JArray(regionWorld.Select(v => Math.Round(v, 6))),
+                        ["leaves_only"] = leavesOnly,
+                        ["outside"] = outsideRegion,
+                    };
+                }
                 if (counts.Count > 0) result["counts_by_state"] = counts;
                 if (missing.Count > 0)
                 {
@@ -296,6 +361,44 @@ namespace SolidworksExecution.Services
             }
         }
 
+        private sealed class RegionHit
+        {
+            public IComponent2 C;
+            public string Path;
+            public double[] Box;
+        }
+
+        private static bool HasChildren(IComponent2 c)
+        {
+            try { return c.GetChildren() is object[] k && k.Length > 0; } catch { return false; }
+        }
+
+        // component_status(region): the components whose world box overlaps `world`, walking down
+        // from the top and descending only into sub-assemblies whose box overlaps it (or that have
+        // no box). Instance paths are built on the way down. Suppressed components are skipped.
+        private static void RegionWalk(IComponent2 c, string parentPath, double[] world, bool recursive, bool leavesOnly,
+            Dictionary<string, double[]> cache, List<RegionHit> kept, List<string> noBox, ref int scanned,
+            DateTime deadline, ref bool truncated, int depth)
+        {
+            if (c == null || depth > 30) return;
+            if (DateTime.UtcNow > deadline) { truncated = true; return; }
+            string path = (parentPath.Length > 0 ? parentPath + "/" : "") + LastSegment(c.Name2 ?? "?");
+            scanned++;
+            if (SafeSuppression(c) == 0) return;
+            var box = CachedComponentBox(cache, c, path);
+            bool overlaps = box != null && BoxesWithin(box, world, 0);
+            if (box == null) noBox.Add(path);
+            else if (!overlaps) return;
+            object[] kids = null;
+            if (recursive || leavesOnly) { try { kids = c.GetChildren() as object[]; } catch { } }
+            bool hasKids = kids != null && kids.Length > 0;
+            if (overlaps && !(leavesOnly && hasKids)) kept.Add(new RegionHit { C = c, Path = path, Box = box });
+            if (recursive && hasKids)
+                foreach (var k in kids)
+                    RegionWalk(k as IComponent2, path, world, recursive, leavesOnly, cache, kept, noBox, ref scanned,
+                        deadline, ref truncated, depth + 1);
+        }
+
         private ExecutionResponse ReadOnlyResponse(ToolRequest request, IModelDoc2 doc, JObject result)
         {
             return new ExecutionResponse
@@ -374,12 +477,17 @@ namespace SolidworksExecution.Services
             try { return string.IsNullOrEmpty(f) || File.Exists(f); } catch { return true; }
         }
 
-        private JObject ComponentStatusJson(IComponent2 c, bool includeMates, bool boxes = false, DateTime? deadline = null)
+        // knownPath: the instance path when the caller has it (ComponentPath walks the parents).
+        // boxGiven: knownBox is the world box already read (null = none); otherwise the box comes
+        // from boxCache when given, else from GetBox.
+        private JObject ComponentStatusJson(IComponent2 c, bool includeMates, bool boxes = false, DateTime? deadline = null,
+            string knownPath = null, double[] knownBox = null, bool boxGiven = false, Dictionary<string, double[]> boxCache = null)
         {
             string state = SuppressionName(c);
+            string cpath = knownPath ?? ComponentPath(c);
             var j = new JObject
             {
-                ["component"] = ComponentPath(c),
+                ["component"] = cpath,
                 ["suppression"] = state,
                 ["file"] = SafeComponentPath(c),
             };
@@ -408,7 +516,7 @@ namespace SolidworksExecution.Services
             {
                 // World (top-assembly) bounding box, mm: a rough keep-out zone. Sheet-metal
                 // brackets fill little of their box.
-                var b = ComponentBox(c);
+                var b = boxGiven ? knownBox : boxCache != null ? CachedComponentBox(boxCache, c, cpath) : ComponentBox(c);
                 if (b != null) j["box_mm"] = new JArray(b.Select(v => Math.Round(v * 1000, 2)));
             }
             if (includeMates)

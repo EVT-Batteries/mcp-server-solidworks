@@ -1,3 +1,4 @@
+import contextlib
 import contextvars
 import csv
 import functools
@@ -19,8 +20,9 @@ from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp.shared.exceptions import MCPError
 from config import LONG_HTTP_TIMEOUT
 from execution_client import call_tool, get_state, ensure_ready as _ensure_ready, ExecutionLayerError
-from response_mapper import map_response
+from response_mapper import CadOperationError, map_response
 import assembly_math as am
+import corridor as _corridor
 # NOTE: pycompiler is reached via `from ir_execution_port import run_feature_graph` imported
 # LAZILY inside rebuild_from_ir and submit_feature_graph — a missing compiler tree degrades to a
 # clean tool error instead of killing the whole MCP server at startup.
@@ -119,6 +121,7 @@ LONG_TOOLS = {
     "routing_status", "import_from_to", "route_path", "route_guidelines", "start_route",
     "replace_component", "insert_part", "edit_bodies", "check_path_clearance",
     "analyze_model", "connector_cavities", "add_connector_pins", "file_dependencies",
+    "occupancy_grid", "find_corridor",
 }
 
 
@@ -678,6 +681,9 @@ def component_status(
     boxes: bool = False,
     time_budget_s: Annotated[float, Field(ge=0)] = 60.0,
     fields: str = "",
+    region: str = "",
+    region_frame_component: str = "",
+    leaves_only: bool = False,
 ) -> str:
     """Read-only status of the active assembly's components (does NOT change state_version).
     components: JSON list of component names or instance paths ("Sub-1/Part-1", nested ones
@@ -701,12 +707,29 @@ def component_status(
     that sub-assembly and run component_status there. `fixed` is reliable for components of the
     active assembly itself (open the sub-assembly for its own components).
     fields: comma-separated keys to keep per component (component is always kept), e.g.
-    'transform' or 'suppression,file': a short answer when only positions or states matter."""
+    'transform' or 'suppression,file': a short answer when only positions or states matter.
+    region: JSON [x0,y0,z0,x1,y1,z1] (m): keep only components whose world bounding box overlaps
+    it (in region_frame_component's coordinates when given, e.g. a sub-assembly 'Sub-1'; its 8
+    corners are mapped to the top assembly and their box used). Filtered on the server while
+    walking down the tree: sub-assemblies outside the region are not descended, and components
+    outside cost one GetBox, so a region over a 1,500-component assembly answers in seconds
+    instead of minutes. With region, box_mm is always returned, counts_by_state covers the kept
+    components, and the result has region {region, frame, world_box, leaves_only, outside};
+    leaves_only=True drops components that have children (sub-assemblies). Component boxes are
+    cached per assembly while its update stamp is unchanged (boxes=True or region): box_cache
+    'hit' or 'built'. Boxes are approximate (SOLIDWORKS GetBox) and an L-shaped bracket fills
+    little of its box: use occupancy_grid for the real free space."""
     params = {
         "components": components, "match": match, "state": state, "recursive": recursive,
         "limit": limit, "include_mates": include_mates, "boxes": boxes,
         "time_budget_s": time_budget_s}
-    keep = [f.strip() for f in fields.replace(";", ",").split(",") if f.strip()]
+    if region.strip() not in ("", "[]"):
+        params["region"] = region
+        if region_frame_component.strip():
+            params["region_frame_component"] = region_frame_component.strip()
+        if leaves_only:
+            params["leaves_only"] = True
+    keep =[f.strip() for f in fields.replace(";", ",").split(",") if f.strip()]
     if not keep:
         return _call("component_status", params)
     raw, pl = _call_json("component_status", params)
@@ -714,6 +737,60 @@ def component_status(
                         for c in pl.get("components") or []]
     pl["fields"] = keep
     return _text_with(raw, pl)
+
+
+# ---------------------------------------------------------------------------
+# Tool: occupancy_grid
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def occupancy_grid(
+    region: str,
+    resolution: Annotated[float, Field(gt=0)] = 0.002,
+    frame_component: str = "",
+    ignore: str = "[]",
+    include_hidden: bool = False,
+    dilate: Annotated[float, Field(ge=0)] = 0.0,
+    time_budget_s: Annotated[float, Field(ge=0)] = 300.0,
+    out_path: str = "",
+) -> str:
+    """Read-only voxel occupancy of a box region of the active assembly, from the components'
+    real tessellated geometry (does NOT change state_version; it may resolve lightweight
+    components in the region, listed in resolved_from_lightweight). For route / harness planning:
+    bounding boxes overstate sheet-metal brackets, the voxels do not.
+    region: JSON [x0,y0,z0,x1,y1,z1] (m), in frame_component's coordinates when given (an
+    instance path such as 'Sub-1'; the output is in that frame too), else in the top assembly's.
+    resolution: voxel edge (m); more than 8,000,000 voxels fails with GRID_TOO_LARGE.
+    ignore: JSON list of instance-path fragments to leave out (e.g. '["Sub-1/"]' for the
+    sub-assembly being planned). Hidden components are left out unless include_hidden; suppressed
+    ones always. dilate (m): also mark every voxel whose centre lies within this distance of an
+    occupied voxel's centre (Euclidean). Leaf parts whose box misses the region are skipped;
+    solid AND surface bodies count. A closed solid gives a shell of occupied voxels (flood-fill
+    from a free start point). time_budget_s: components left when it runs out are listed in
+    not_processed (truncated=true) and show as free.
+    Result: {frame ('world' or frame_component), origin [x0,y0,z0] (the region's min corner),
+    resolution, dims [nx,ny,nz], occupied_rle [[start, count], ...] sorted runs over the linear
+    index i = ix + nx*(iy + ny*iz) (voxel ix spans origin_x + [ix, ix+1]*resolution),
+    occupied_count, components [{component, voxels}] (most voxels first, at most 200),
+    skipped_lightweight (no box or could not be resolved: their space shows free), triangles,
+    elapsed_s}, plus occupied_before_dilate, no_tessellation, tessellation_sources, box_cache.
+    out_path: write that full JSON to this file and return it without occupied_rle (the run list
+    can be large): use it when a script reads the grid."""
+    params = {
+        "region": region, "resolution": resolution, "frame_component": frame_component.strip(),
+        "ignore": ignore, "include_hidden": include_hidden, "dilate": dilate,
+        "time_budget_s": time_budget_s}
+    if not out_path.strip():
+        return _call("occupancy_grid", params)
+    raw, pl = _call_json("occupancy_grid", params)
+    path = os.path.abspath(out_path.strip())
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(pl, fh, separators=(",", ":"))
+    summary = {k: v for k, v in pl.items() if k != "occupied_rle"}
+    summary["runs"] = len(pl.get("occupied_rle") or [])
+    summary["components"] = (pl.get("components") or [])[:30]
+    summary["out_path"] = path
+    return _text_with(raw, summary)
 
 
 # ---------------------------------------------------------------------------
@@ -2535,6 +2612,8 @@ def check_path_clearance(
     keep_probe: bool = False,
     max_paths: Annotated[int, Field(ge=1)] = 24,
     frame_component: str = "",
+    paths_file: str = "",
+    names: str = "",
 ) -> str:
     """Is a candidate bundle path free in the ACTIVE ASSEMBLY, before any route or bundle part is
     drawn on it? Read-only for the model: builds the path as a circular-profile tube (same
@@ -2556,24 +2635,64 @@ def check_path_clearance(
     keep_probe=True leaves the tube in the assembly (probe_component) to look at; delete it with
     edit_feature or close without saving.
     Each path is its own body; a path whose sweep fails is left out and listed in unswept_paths
-    (then clear=false). Keep probes small: more than max_paths paths are refused (30 fan legs
-    meeting at one join once crashed SOLIDWORKS in the interference check). Probe a fan's outer
-    legs and its bundle, not every leg.
+    (then clear=false). Keep each probe small (30 fan legs meeting at one join once crashed
+    SOLIDWORKS in the interference check): a selection of more than max_paths paths is checked
+    in batches of max_paths, one probe each, and merged (interferences with the global path
+    index and path_name, counts summed, clear = every batch clear, batches [{paths, clear,
+    interference_count}]). Probe a fan's outer legs and its bundle, not every leg.
+    paths_file: a JSON file whose "paths" are probed instead of points / paths: plan_probe_sizes'
+    probe_out (each path sized by the wires it carries) or a route_path / route_follow plan
+    ({name, points, bend_radii | bend_radius, diameter?}; a path without diameter takes
+    `diameter`). names: JSON list of path names to probe only those (paths_file or paths).
+    Interferences, ignored hits and unswept paths carry path_name when the paths have names.
     frame_component: the points are in THIS component's coordinates (an instance path of the
     active assembly, e.g. a sub-assembly holding a route: route plans are in its frame); they are
     mapped to the active assembly before the check (result frame_component, frame_transform).
     Reported boxes and positions are in the active assembly's coordinates."""
+    try:
+        plist = None
+        if paths_file.strip():
+            if (points or "[]").strip() != "[]" or (paths or "[]").strip() not in ("", "[]"):
+                raise ValueError("give paths_file or points / paths, not both")
+            loaded = am.load_json_arg(paths_file, "paths_file")
+            plist = (loaded or {}).get("paths") if isinstance(loaded, dict) else loaded
+            if not isinstance(plist, list) or not plist:
+                raise ValueError(f"paths_file has no paths list: {paths_file}")
+        elif (paths or "").strip() not in ("", "[]"):
+            plist = json.loads(paths)
+            if not isinstance(plist, list):
+                raise ValueError("paths must be a JSON list")
+        wanted = am.load_json_arg(names, "names") if names.strip() else None
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ToolError(f"check_path_clearance: {exc}") from exc
+    if wanted is not None:
+        if plist is None:
+            raise ToolError("check_path_clearance: names selects among paths_file / paths")
+        known = [str(p.get("name")) for p in plist if isinstance(p, dict)]
+        missing = [n for n in wanted if str(n) not in known]
+        if missing:
+            raise ToolError(f"check_path_clearance: names not in the paths: {missing}; known: {known[:60]}")
+        keep = {str(n) for n in wanted}
+        plist = [p for p in plist if isinstance(p, dict) and str(p.get("name")) in keep]
+    if plist is not None:
+        # Only what the server reads (a probe_out also holds wire lists).
+        plist = [{k: p[k] for k in ("points", "bend_radii", "bend_radius", "diameter") if k in p}
+                 | ({"name": str(p["name"])} if p.get("name") is not None else {})
+                 for p in plist if isinstance(p, dict)]
+        for p in plist:
+            if not p.get("diameter"):
+                if diameter <= 0:
+                    raise ToolError(f"check_path_clearance: path {p.get('name') or '?'} has no diameter: pass diameter")
+                p["diameter"] = diameter
     if frame_component.strip():
         t = _component_transforms([frame_component])[frame_component]["transform"]
         try:
             pts = json.loads(points or "[]")
-            plist = json.loads(paths or "[]")
         except json.JSONDecodeError as exc:
             raise ToolError(f"check_path_clearance: points / paths not JSON: {exc}") from exc
         points = json.dumps([am.xf_point(t, q) for q in pts])
-        for p in plist:
+        for p in plist or []:
             p["points"] = [am.xf_point(t, q) for q in p.get("points") or []]
-        paths = json.dumps(plist)
     params = {
         "points": points, "diameter": diameter, "bend_radius": bend_radius,
         "bend_radii": bend_radii, "paths": paths, "clearance": clearance, "ignore": ignore,
@@ -2581,10 +2700,38 @@ def check_path_clearance(
         "limit": limit, "keep_probe": keep_probe}
     if max_paths != 24:
         params["max_paths"] = max_paths
-    text = _call("check_path_clearance", params)
-    if frame_component.strip():
-        text += f" | frame_component={frame_component} | frame_transform={json.dumps(t)}"
-    return text
+    frame_note = (f" | frame_component={frame_component} | frame_transform={json.dumps(t)}"
+                  if frame_component.strip() else "")
+    if plist is None:
+        return _call("check_path_clearance", params) + frame_note
+    path_names = [p.get("name") for p in plist]
+    named = any(n is not None for n in path_names)
+    server_paths = [{k: v for k, v in p.items() if k != "name"} for p in plist]
+    groups = am.batches(server_paths, max_paths)
+    if len(groups) == 1:
+        params["paths"] = json.dumps(groups[0])
+        if not named:
+            return _call("check_path_clearance", params) + frame_note
+        raw, pl = _call_json("check_path_clearance", params)
+        am.label_hits(pl, 0, path_names)
+        return _text_with(raw, pl) + frame_note
+    results, raw, start = [], None, 0
+    for group in groups:
+        params["paths"] = json.dumps(group)
+        try:
+            raw, pl = _call_json("check_path_clearance", params)
+        except CadOperationError as exc:   # e.g. no path of this batch could be swept
+            pl = {"paths": len(group), "path_length_mm": [None] * len(group),
+                  "interference_count": 0, "clear": False,
+                  "unswept_paths": [{"path": i, "error": f"batch failed: {str(exc)[:300]}"}
+                                    for i in range(len(group))]}
+        results.append((start, pl))
+        start += len(group)
+    if raw is None:
+        raise ToolError("check_path_clearance: every batch failed: "
+                        + "; ".join(str(u.get("error")) for _, pl in results for u in pl["unswept_paths"][:1]))
+    merged = am.merge_clearance_results(results, path_names, limit)
+    return _text_with(raw, merged) + frame_note
 
 
 def _route_path_params(route: str, *, dry_run: bool, fan_out: list, paths: list,
@@ -2600,6 +2747,57 @@ def _route_path_params(route: str, *, dry_run: bool, fan_out: list, paths: list,
     if paths:
         params["paths"] = json.dumps(paths)
     return params
+
+
+class _StepTimer:
+    """Wall-clock seconds per named step of a composite tool (a repeated step adds up). A step
+    that raises re-raises as ToolError with the timings so far appended."""
+
+    def __init__(self, tool: str):
+        self.tool = tool
+        self.t0 = time.perf_counter()
+        self.steps: dict = {}
+
+    @contextlib.contextmanager
+    def step(self, name: str):
+        start = time.perf_counter()
+        try:
+            yield
+        except Exception as exc:
+            self._add(name, start)
+            raise ToolError(f"{exc} | {self.tool} failed in step {name} | "
+                            f"timings_s={json.dumps(self.result())}") from exc
+        self._add(name, start)
+
+    def _add(self, name: str, start: float) -> None:
+        self.steps[name] = round(self.steps.get(name, 0.0) + time.perf_counter() - start, 2)
+
+    def result(self) -> dict:
+        return dict(self.steps, total=round(time.perf_counter() - self.t0, 2))
+
+
+def _plan_base(plan: str, route: str, temp_folder: str) -> str:
+    """Path stem for files derived from a plan: next to a plan file, else <TEMP>/<temp_folder>/<route>."""
+    if os.path.isfile(plan.strip()):
+        return os.path.splitext(os.path.abspath(plan.strip()))[0]
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in route)
+    folder = os.path.join(os.environ.get("TEMP") or os.getcwd(), temp_folder)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, safe)
+
+
+def _route_wire_ends(route: str, fan_out: list, max_kink_deg: float = 15.0) -> tuple:
+    """(routing_status payload with the stub check: route.wires, route.stub_check.stubs [{end
+    'REF.pin', component, stub_end_mm}], the fan_out joins of a dry run [{connector, pins, join,
+    join_mm}] (empty without fan_out)). Read-only."""
+    _, st = _call_json("routing_status", {"route": route, "verbose": False, "check_stubs": True,
+                                          "stub_tolerance_mm": 0.05})
+    fans = []
+    if fan_out:
+        _, fd = _call_json("route_path", _route_path_params(route, dry_run=True, fan_out=fan_out,
+                                                             paths=[], max_kink_deg=max_kink_deg))
+        fans = [f for f in fd.get("fan_out") or [] if isinstance(f, dict)]
+    return st, fans
 
 
 @mcp.tool(structured_output=False)
@@ -2642,8 +2840,11 @@ def route_follow(
        compare_to / csv_note: the wire table as routing_status writes it.
     Usual loop: reimport=True, draw=False; fix plan_out by hand where the summary shows a
     problem; then route=<new_route>, plan=<plan_out>, reimport=False, draw=True. Returns a short
-    summary (moves, dry run, draw, coverings, status). A draw on a large assembly can take
-    minutes: run it with start_job."""
+    summary (moves, dry run, draw, coverings, status) and timings_s: the seconds each step took
+    (export_coverings, import, follow, dry_run, draw, coverings_import, status, total; also
+    appended to the error of a step that fails). A draw on a large assembly can take minutes:
+    run it with start_job."""
+    timer = _StepTimer("route_follow")
     try:
         plan_obj = am.load_json_arg(plan, "plan")
         leads = am.load_json_arg(lead_points, "lead_points") or {}
@@ -2651,25 +2852,24 @@ def route_follow(
         raise ToolError(f"route_follow: {exc}") from exc
     if not isinstance(plan_obj, dict) or not plan_obj.get("paths"):
         raise ToolError("route_follow: plan needs {paths: [...]} (and fan_out if the route has fans)")
-    if os.path.isfile(plan.strip()):
-        base = os.path.splitext(os.path.abspath(plan.strip()))[0]
-    else:
-        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in route)
-        folder = os.path.join(os.environ.get("TEMP") or os.getcwd(), "solidpilot_route_follow")
-        os.makedirs(folder, exist_ok=True)
-        base = os.path.join(folder, safe)
+    base = _plan_base(plan, route, "solidpilot_route_follow")
     coverings_path = coverings_path.strip() or base + ".coverings.json"
     plan_out = plan_out.strip() or base.removesuffix(".followed") + ".followed.json"
     summary: dict = {"route": route}
     fan_out = plan_obj.get("fan_out") or []
 
+    def done() -> str:
+        summary["timings_s"] = timer.result()
+        return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
+
     if reimport:
         if not from_to.strip():
             raise ToolError("route_follow: reimport needs from_to (and cable_library)")
         tmp = coverings_path + ".new"
-        _, ex = _call_json("route_covering", {"route": route, "action": "export", "file_path": tmp,
-                                              "min_wires": 0, "name": "", "part_number": "",
-                                              "outer_diameter": 0.0})
+        with timer.step("export_coverings"):
+            _, ex = _call_json("route_covering", {"route": route, "action": "export", "file_path": tmp,
+                                                  "min_wires": 0, "name": "", "part_number": "",
+                                                  "outer_diameter": 0.0})
         n = int(ex.get("exported") or 0)
         if n == 0 and os.path.isfile(coverings_path):
             os.remove(tmp)
@@ -2677,20 +2877,22 @@ def route_follow(
         else:
             os.replace(tmp, coverings_path)
             summary["coverings_exported"] = n
-        _, im = _call_json("import_from_to", {
-            "from_to": from_to, "cable_library": cable_library, "component_library": "",
-            "references": "{}", "convert_guidelines": False, "route_wires": False,
-            "use_existing_assembly": True, "overwrite": True, "search_sub_assemblies": True,
-            "press_ok": 3, "route": "", "edit_route_first": False, "replaces": route,
-            "configurations": configurations})
+        with timer.step("import"):
+            _, im = _call_json("import_from_to", {
+                "from_to": from_to, "cable_library": cable_library, "component_library": "",
+                "references": "{}", "convert_guidelines": False, "route_wires": False,
+                "use_existing_assembly": True, "overwrite": True, "search_sub_assemblies": True,
+                "press_ok": 3, "route": "", "edit_route_first": False, "replaces": route,
+                "configurations": configurations})
         if not im.get("imported") or not im.get("new_route"):
-            raise ToolError(f"route_follow: import failed: {json.dumps({k: im.get(k) for k in ('imported', 'warnings', 'steps')})[:1500]}")
+            raise ToolError(f"route_follow: import failed: {json.dumps({k: im.get(k) for k in ('imported', 'warnings', 'steps')})[:1500]}"
+                            f" | timings_s={json.dumps(timer.result())}")
         route = im["new_route"]
         summary["import"] = {"new_route": route, "deleted_files": len(im.get("deleted_files") or []),
                              "suppressed_in": im.get("suppressed_in"), "warnings": im.get("warnings")}
 
-    _, st = _call_json("routing_status", {"route": route, "verbose": False, "check_stubs": True,
-                                          "stub_tolerance_mm": 0.05})
+    with timer.step("follow"):
+        st, fans = _route_wire_ends(route, fan_out, max_kink_deg)
     sc = (st.get("route") or {}).get("stub_check") or {}
     fan_names = {str(f.get("connector")) for f in fan_out}
 
@@ -2699,27 +2901,26 @@ def route_follow(
 
     candidates = [(s["end"], [v / 1000.0 for v in s["stub_end_mm"]]) for s in sc.get("stubs") or []
                   if isinstance(s.get("stub_end_mm"), list) and not is_fan(str(s.get("component", "")))]
-    if fan_out:
-        _, fd = _call_json("route_path", _route_path_params(route, dry_run=True, fan_out=fan_out,
-                                                             paths=[], max_kink_deg=max_kink_deg))
-        for f in fd.get("fan_out") or []:
-            if isinstance(f.get("join"), list):
-                candidates.append(("fan " + str(f.get("connector")), f["join"]))
+    for f in fans:
+        if isinstance(f.get("join"), list):
+            candidates.append(("fan " + str(f.get("connector")), f["join"]))
     summary["candidates"] = len(candidates)
     if sc.get("detached_count"):
         summary["detached_stubs"] = sc.get("detached")
     if sc.get("not_found"):
         summary["stubs_not_found"] = sc.get("not_found")
 
-    followed, moves = am.follow_plan(plan_obj, candidates, leads, max_move)
-    with open(plan_out, "w", encoding="utf-8") as fh:
-        json.dump(followed, fh, indent=1)
+    with timer.step("follow"):
+        followed, moves = am.follow_plan(plan_obj, candidates, leads, max_move)
+        with open(plan_out, "w", encoding="utf-8") as fh:
+            json.dump(followed, fh, indent=1)
     summary["plan_out"] = plan_out
     summary["moves"] = [m for m in moves if m["move_mm"] > 0.001 or m.get("skipped") or m.get("ambiguous")]
     summary["ends_unchanged"] = len(moves) - len(summary["moves"])
 
-    _, dry = _call_json("route_path", _route_path_params(route, dry_run=True, fan_out=fan_out,
-                                                         paths=followed["paths"], max_kink_deg=max_kink_deg))
+    with timer.step("dry_run"):
+        _, dry = _call_json("route_path", _route_path_params(route, dry_run=True, fan_out=fan_out,
+                                                             paths=followed["paths"], max_kink_deg=max_kink_deg))
     no_room = [{"path": p.get("name"), "min_straight_mm": (p.get("geometry") or {}).get("min_straight_mm")}
                for p in dry.get("paths") or []
                if ((p.get("geometry") or {}).get("min_straight_mm") is not None
@@ -2732,22 +2933,24 @@ def route_follow(
     if not draw:
         summary["next"] = ("draw: route_follow(route=new route, plan=plan_out, reimport=False, draw=True)"
                            if clean else "fix plan_out (see dry_run), then draw")
-        return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
+        return done()
     if not clean:
         summary["drawn"] = False
         summary["reason"] = "dry run not clean: nothing drawn"
-        return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
+        return done()
 
-    _, dr = _call_json("route_path", _route_path_params(route, dry_run=False, fan_out=fan_out,
-                                                        paths=followed["paths"], max_kink_deg=max_kink_deg))
+    with timer.step("draw"):
+        _, dr = _call_json("route_path", _route_path_params(route, dry_run=False, fan_out=fan_out,
+                                                            paths=followed["paths"], max_kink_deg=max_kink_deg))
     wires = dr.get("wires") or []
     summary["drawn"] = {"wires": len(wires),
                         "errors": [{"wire": w.get("name"), "errors": w.get("errors")} for w in wires if w.get("errors")],
                         "sharp_bend_nodes": (dr.get("bends") or {}).get("sharp_bend_nodes"),
                         "max_kink_deg": max((w.get("max_kink_deg") or 0) for w in wires) if wires else None}
     if os.path.isfile(coverings_path):
-        _, cv = _call_json("route_covering", {"route": route, "action": "import", "file_path": coverings_path,
-                                              "min_wires": 0, "name": "", "part_number": "", "outer_diameter": 0.0})
+        with timer.step("coverings_import"):
+            _, cv = _call_json("route_covering", {"route": route, "action": "import", "file_path": coverings_path,
+                                                  "min_wires": 0, "name": "", "part_number": "", "outer_diameter": 0.0})
         summary["coverings"] = {"applied_segments": cv.get("applied_segments"),
                                 "unmatched_entries": cv.get("unmatched_entries"),
                                 "uncovered_segments": [[s.get("id"), s.get("wire_count")] for s in cv.get("uncovered_segments") or []
@@ -2756,8 +2959,9 @@ def route_follow(
     if max_kink_deg != 15.0:
         params["max_kink_deg"] = max_kink_deg
     previous = _read_wire_csv(compare_to) if compare_to.strip() else {}
-    raw = _call_raw("routing_status", params)
-    map_response(raw)
+    with timer.step("status"):
+        raw = _call_raw("routing_status", params)
+        map_response(raw)
     full = _payload_of(raw)
     if status_path.strip():
         with open(status_path, "w", encoding="utf-8") as fh:
@@ -2771,7 +2975,232 @@ def route_follow(
         summary["csv"] = {"path": csv_path, "rows": rows}
         if compare_to.strip():
             summary["csv"]["changed_over_1mm"] = changed
-    return "COMPLETED | route_follow | " + json.dumps(summary, separators=(",", ":"))
+    return done()
+
+
+@mcp.tool(structured_output=False)
+def plan_probe_sizes(
+    route: str,
+    plan: str,
+    covering_rule: str = "[]",
+    default_diameter: Annotated[float, Field(gt=0)] = 0.006,
+    probe_out: str = "",
+    snap_mm: Annotated[float, Field(gt=0)] = 1.0,
+    max_kink_deg: Annotated[float, Field(ge=0, le=180)] = 15.0,
+) -> str:
+    """Size the clearance probes of a route plan like the route SOLIDWORKS will draw (adapter-side,
+    read-only). The ACTIVE assembly holds the route (as for route_path / route_follow).
+    A drawn bundle is thicker than its bare wires: the covering on each route segment depends on
+    how many wires run there. This walks every from-to wire of the route through the plan and
+    writes each path's diameter, so check_path_clearance(paths_file=probe_out) probes what will
+    really be drawn.
+    route: the route sub-assembly whose wires and stubs are read (routing_status with
+        check_stubs; a fan_out dry run gives the fan joins: nothing is drawn).
+    plan: JSON {fan_out, paths: [{name, points (m), bend_radii | bend_radius}]} inline or a .json
+        file path, as route_follow takes it (active assembly coordinates).
+    Wire walk: path ends within snap_mm (default 1 mm) are one node, each path an edge. A wire end
+        'REF.pin' enters the plan at its connector's fan join when the plan fans that connector
+        out, else at its stub end; the wire runs along the shortest chain of paths between its
+        two ends.
+    covering_rule: JSON [[min_wires, outside_diameter_m], ...], e.g. [[24,0.0115],[9,0.0093],
+        [2,0.006]]: the entry with the largest min_wires <= the path's wire count applies. No
+        match: one wire keeps its own OD; several wires get 1.15*sqrt(sum OD^2).
+    default_diameter (m): a path that carries no wire.
+    probe_out: the probe file (default next to the plan file: <name>.probe.json; inline plans go to
+        the temp folder): {route, covering_rule_mm, paths: [{name, points, bend_radii |
+        bend_radius, diameter (m), wire_count, wires, sized_by}]}.
+    Returns a summary: paths, diameters_mm {diameter: path count}, path_sizes {name: [mm, wires]},
+    wires, placed, outside (wires with no end on the plan: e.g. a later stage), problems (a wire
+    with one end off the plan, no chain of paths between its ends, a path with no wire, a fan
+    connector without a reference), probe_out."""
+    try:
+        plan_obj = am.load_json_arg(plan, "plan")
+        rule_m = am.load_json_arg(covering_rule, "covering_rule") or []
+        if not isinstance(rule_m, list) or not all(
+                isinstance(r, (list, tuple)) and len(r) == 2 and all(isinstance(x, (int, float)) for x in r)
+                for r in rule_m):
+            raise ValueError("covering_rule: JSON [[min_wires, outside_diameter_m], ...]")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ToolError(f"plan_probe_sizes: {exc}") from exc
+    if not isinstance(plan_obj, dict) or not plan_obj.get("paths"):
+        raise ToolError("plan_probe_sizes: plan needs {paths: [...]} (and fan_out if the route has fans)")
+    rule_mm = [[int(n), float(d) * 1000.0] for n, d in rule_m]
+    probe_out = probe_out.strip() or (
+        _plan_base(plan, route, "solidpilot_route_follow").removesuffix(".followed") + ".probe.json")
+    fan_out = plan_obj.get("fan_out") or []
+    st, fans = _route_wire_ends(route, fan_out, max_kink_deg)
+    rj = st.get("route") or {}
+    wires = [w for w in rj.get("wires") or [] if isinstance(w, dict)]
+    stubs = [s for s in (rj.get("stub_check") or {}).get("stubs") or [] if isinstance(s, dict)]
+    ends, fan_problems = am.wire_end_points_mm(stubs, fans)
+    plan_paths = [p for p in plan_obj["paths"] if isinstance(p, dict)]
+    paths_mm = [{"name": p.get("name") or f"path{i}",
+                 "points": [[v * 1000.0 for v in q] for q in p.get("points") or []]}
+                for i, p in enumerate(plan_paths)]
+    sized = am.size_paths_by_wire_sets(paths_mm, wires, ends, rule_mm, default_diameter * 1000.0, snap_mm)
+    out_paths = []
+    for p, s in zip(plan_paths, sized["paths"]):
+        q = {"name": s["name"], "points": p.get("points")}
+        for k in ("bend_radii", "bend_radius"):
+            if k in p:
+                q[k] = p[k]
+        q.update(diameter=round(s["diameter_mm"] / 1000.0, 7), wire_count=s["wire_count"],
+                 wires=s["wires"], sized_by=s["sized_by"])
+        out_paths.append(q)
+    folder = os.path.dirname(os.path.abspath(probe_out))
+    os.makedirs(folder, exist_ok=True)
+    with open(probe_out, "w", encoding="utf-8") as fh:
+        json.dump({"route": route, "covering_rule_mm": rule_mm, "paths": out_paths}, fh, indent=1)
+    diameters: dict = {}
+    for s in sized["paths"]:
+        key = f"{s['diameter_mm']:g}"
+        diameters[key] = diameters.get(key, 0) + 1
+    problems = fan_problems + sized["problems"]
+    summary = {
+        "route": route, "paths": len(out_paths), "diameters_mm": diameters,
+        "path_sizes": {s["name"]: [round(s["diameter_mm"], 2), s["wire_count"]] for s in sized["paths"]},
+        "wires": len(wires), "placed": len(sized["placed"]), "outside": len(sized["outside"]),
+        "problems_count": len(problems), "problems": problems[:40], "probe_out": probe_out}
+    if 0 < len(sized["outside"]) <= 20:
+        summary["outside_wires"] = sized["outside"]
+    nf = (rj.get("stub_check") or {}).get("not_found")
+    if nf:
+        summary["stubs_not_found"] = nf
+    return "COMPLETED | plan_probe_sizes | " + json.dumps(summary, separators=(",", ":"))
+
+
+@mcp.tool(structured_output=False)
+def find_corridor(
+    start: str,
+    start_dir: str,
+    end: str,
+    end_dir: str,
+    diameter: Annotated[float, Field(gt=0)],
+    bend_radius: Annotated[float, Field(ge=0)],
+    clearance: Annotated[float, Field(ge=0)] = 0.001,
+    lead: float | None = None,
+    region: str = "",
+    margin: Annotated[float, Field(ge=0)] = 0.06,
+    resolution: Annotated[float, Field(gt=0)] = 0.002,
+    frame_component: str = "",
+    ignore: str = "[]",
+    max_candidates: Annotated[int, Field(ge=1)] = 3,
+    grid_file: str = "",
+    save_grid: str = "",
+    time_budget_s: Annotated[float, Field(ge=0)] = 60.0,
+) -> str:
+    """Find feasible filleted bundle corridors from start to end through the active assembly
+    (adapter-side, read-only; calls occupancy_grid unless grid_file is given).
+    All lengths and coordinates are in METERS, in frame_component's coordinates (default: top
+    assembly).
+    start / end: JSON [x,y,z] (m) of the stub end or connector exit.
+    start_dir: JSON [dx,dy,dz] direction the bundle LEAVES start.
+    end_dir: JSON [dx,dy,dz] direction the bundle travels when it ARRIVES at end.
+    diameter (m): bundle outer diameter; bend_radius (m): tangent fillet radius at every
+        interior corner; clearance (m, default 0.001): extra inflation margin around obstacles.
+    lead (m, optional): straight lead distance along start_dir / against end_dir before the first
+        / after the last corner (default bend_radius).
+    region: JSON [x0,y0,z0,x1,y1,z1] (m). When omitted, uses the start..end bounding box padded
+        by max(margin, 2*bend_radius + diameter + clearance).
+    resolution (m, default 0.002): occupancy voxel edge; ignore: JSON list of instance-path
+        fragments passed to occupancy_grid (e.g. '["Harness-1/"]').
+    grid_file: reuse a saved occupancy_grid JSON instead of calling SolidWorks.
+    save_grid: write the fetched occupancy_grid JSON to this path for later reuse.
+    Returns {frame, candidates [{points (m), bend_radii (m), length_mm, corners,
+    deflections_deg, min_straight_mm, min_clearance_mm, ...}], probe_paths (JSON string ready
+    for check_path_clearance(paths=...)), grid_stats, warnings, rejected}."""
+    try:
+        start_v = [float(v) for v in am.load_json_arg(start, "start")]
+        start_dir_v = [float(v) for v in am.load_json_arg(start_dir, "start_dir")]
+        end_v = [float(v) for v in am.load_json_arg(end, "end")]
+        end_dir_v = [float(v) for v in am.load_json_arg(end_dir, "end_dir")]
+        for name_v, vec in (("start", start_v), ("start_dir", start_dir_v),
+                            ("end", end_v), ("end_dir", end_dir_v)):
+            if len(vec) != 3:
+                raise ValueError(f"{name_v} must have 3 numbers")
+        if lead is not None and lead < 0:
+            raise ValueError("lead must be >= 0")
+        reg_v = None
+        if region.strip() not in ("", "[]"):
+            reg_v = [float(v) for v in am.load_json_arg(region, "region")]
+            if len(reg_v) != 6:
+                raise ValueError("region must have 6 numbers [x0,y0,z0,x1,y1,z1]")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ToolError(f"find_corridor: {exc}") from exc
+
+    grid_s = 0.0
+    saved_path = None
+    used_grid_file = None
+    if grid_file.strip():
+        used_grid_file = os.path.abspath(grid_file.strip())
+        try:
+            grid = am.load_json_arg(used_grid_file, "grid_file")
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ToolError(f"find_corridor: {exc}") from exc
+        if not isinstance(grid, dict):
+            raise ToolError(f"find_corridor: grid_file must hold a JSON object: {used_grid_file}")
+    else:
+        if reg_v is None:
+            pad = max(margin, 2.0 * bend_radius + diameter + clearance)
+            reg_v = [min(start_v[i], end_v[i]) - pad for i in range(3)] + [
+                max(start_v[i], end_v[i]) + pad for i in range(3)]
+        t0 = time.perf_counter()
+        _, grid = _call_json("occupancy_grid", {
+            "region": json.dumps(reg_v),
+            "resolution": resolution,
+            "frame_component": frame_component.strip(),
+            "ignore": ignore,
+            "include_hidden": False,
+            "dilate": 0.0,
+            "time_budget_s": max(time_budget_s, 60.0),
+        })
+        grid_s = round(time.perf_counter() - t0, 3)
+        if save_grid.strip():
+            saved_path = os.path.abspath(save_grid.strip())
+            os.makedirs(os.path.dirname(saved_path), exist_ok=True)
+            with open(saved_path, "w", encoding="utf-8") as fh:
+                json.dump(grid, fh, separators=(",", ":"))
+
+    try:
+        res = _corridor.plan_corridor(
+            grid, start_v, start_dir_v, end_v, end_dir_v,
+            diameter=diameter, bend_radius=bend_radius, clearance=clearance,
+            lead=lead, max_candidates=max_candidates, time_budget_s=time_budget_s,
+        )
+    except _corridor.CorridorError as exc:
+        raise ToolError(f"find_corridor: {exc}") from exc
+
+    probe_list = [
+        {"name": f"cand_{i + 1}", "points": c["points"],
+         "bend_radii": c["bend_radii"], "diameter": diameter}
+        for i, c in enumerate(res["candidates"])
+    ]
+    st = res["stats"]
+    grid_stats = {
+        "dims": st.get("dims"),
+        "occupied_count": st.get("occupied_count"),
+        "resolution_mm": st.get("resolution_mm"),
+        "grid_s": grid_s,
+        "search_s": st.get("search_s"),
+        "inflate_s": st.get("inflate_s"),
+        "flood_s": st.get("flood_s"),
+        "elapsed_s": st.get("elapsed_s"),
+        "coarse_voxels_per_cell": st.get("coarse_voxels_per_cell"),
+        "expansions": st.get("expansions"),
+    }
+    payload = {
+        "frame": grid.get("frame", frame_component.strip() or "world"),
+        "candidates": res["candidates"],
+        "probe_paths": json.dumps(probe_list, separators=(",", ":")),
+        "grid_stats": grid_stats,
+        "warnings": res["warnings"],
+        "rejected": res["rejected"],
+    }
+    if saved_path is not None:
+        payload["saved_grid"] = saved_path
+    if used_grid_file is not None:
+        payload["grid_file"] = used_grid_file
+    return "COMPLETED | find_corridor | " + json.dumps(payload, separators=(",", ":"))
 
 
 @mcp.tool(structured_output=False)

@@ -4,6 +4,7 @@ Transforms are SOLIDWORKS' 13-number component transforms: a 3x3 rotation (row-m
 translation (m) + scale, applied to row vectors: world = p . R + t.
 """
 
+import heapq
 import json
 import math
 import os
@@ -479,6 +480,344 @@ def follow_plan(
     out = dict(plan)
     out["paths"] = new_paths
     return out, moves
+
+
+def covering_diameter_mm(
+    count: int, wire_ods_mm: list, rule: list, default_mm: float
+) -> tuple[float, str]:
+    """The outside diameter (mm) of a bundle of `count` wires and how it was chosen.
+    rule: [[min_wires, od_mm], ...]: the entry with the largest min_wires <= count applies
+    ("covering"). No match: one wire keeps its own OD ("wire"); several wires get the bundle
+    estimate 1.15 * sqrt(sum OD^2) ("bundle_estimate"). No wire, or no OD known: default_mm
+    ("default")."""
+    if count <= 0:
+        return default_mm, "default"
+    match = [r for r in rule if r[0] <= count]
+    if match:
+        return float(max(match, key=lambda r: r[0])[1]), "covering"
+    ods = [d for d in wire_ods_mm if d and d > 0]
+    if not ods:
+        return default_mm, "default"
+    if count == 1:
+        return float(ods[0]), "wire"
+    return bundle_estimate_mm(ods), "bundle_estimate"
+
+
+def bundle_estimate_mm(wire_ods_mm: list) -> float:
+    """Rough outside diameter of loose wires laid together: 1.15 * sqrt(sum OD^2)."""
+    return 1.15 * math.sqrt(sum(d * d for d in wire_ods_mm if d and d > 0))
+
+
+def _polyline_length(points) -> float:
+    return sum(norm(sub(points[k + 1], points[k])) for k in range(len(points) - 1))
+
+
+def wire_end_points_mm(stubs: list, fans: list) -> tuple[dict, list]:
+    """Where each wire end 'REF.pin' enters a route plan (mm): its stub end
+    (routing_status stub_check.stubs [{end, component, stub_end_mm}]), replaced by the fan join
+    (route_path dry run fan_out [{connector, pins, join_mm}]) for the pins of a fanned connector.
+    A fan's connector instance is mapped to its REF through the stubs' component (exact, else the
+    last instance-path segment, case-insensitive). Returns ({end: [x,y,z] mm}, problems)."""
+    ends: dict = {}
+    refs: dict = {}
+    for s in stubs:
+        end = str(s.get("end") or "")
+        if isinstance(s.get("stub_end_mm"), list) and end:
+            ends[end] = [float(v) for v in s["stub_end_mm"]]
+        comp = str(s.get("component") or "")
+        if comp and "." in end:
+            refs.setdefault(comp, end.rsplit(".", 1)[0])
+
+    def ref_of(conn: str) -> str | None:
+        if conn in refs:
+            return refs[conn]
+        last = conn.split("/")[-1].lower()
+        for comp, ref in refs.items():
+            if comp.split("/")[-1].lower() == last:
+                return ref
+        return None
+
+    problems = []
+    for f in fans:
+        conn = str(f.get("connector") or "")
+        join = f.get("join_mm")
+        if not isinstance(join, list) and isinstance(f.get("join"), list):
+            join = [v * 1000.0 for v in f["join"]]
+        ref = ref_of(conn)
+        if ref is None or not isinstance(join, list):
+            problems.append(
+                {
+                    "fan": conn,
+                    "problem": "no reference designator (no stub of this connector in the route)"
+                    if ref is None
+                    else "no join in the dry run",
+                }
+            )
+            continue
+        for pin in f.get("pins") or []:
+            ends[f"{ref}.{pin}"] = [float(v) for v in join]
+    return ends, problems
+
+
+def size_paths_by_wire_sets(
+    paths_mm: list,
+    wires: list,
+    end_points_mm: dict,
+    rule: list,
+    default_mm: float,
+    snap_mm: float = 1.0,
+) -> dict:
+    """Which wires run through each path of a route plan, and the bundle diameter there.
+    paths_mm: [{name, points [[x,y,z] mm, ...]}]: the plan's polylines; their END points are the
+    graph nodes (ends within snap_mm are one node), each path an edge. wires: [{name, from, to
+    ('REF.pin'), diameter_mm}]. end_points_mm: {'REF.pin': [x,y,z] mm}: where each wire end
+    enters the plan (its connector's fan join, else its stub end); an end sits on the node
+    nearest to it within snap_mm. Each wire with both ends on the plan runs along the shortest
+    chain of paths between them. rule / default_mm: see covering_diameter_mm.
+    Returns {paths: [{name, wire_count, wires, diameter_mm, sized_by, bundle_estimate_mm}],
+    placed, outside (wires with no end on the plan: another stage), problems [{wire | path,
+    problem}] (one end off the plan, no chain of paths between the ends, a path with no wire)}."""
+    nodes: list = []
+
+    def node(q) -> int:
+        for i, n in enumerate(nodes):
+            if norm(sub(n, q)) <= snap_mm:
+                return i
+        nodes.append(list(q))
+        return len(nodes) - 1
+
+    names, lengths, adj = [], [], {}
+    for pi, p in enumerate(paths_mm):
+        pts = p.get("points") or []
+        names.append(str(p.get("name") or f"path{pi}"))
+        lengths.append(_polyline_length(pts) if len(pts) > 1 else 0.0)
+        if len(pts) < 2:
+            continue
+        a, b = node(pts[0]), node(pts[-1])
+        adj.setdefault(a, []).append((b, pi))
+        adj.setdefault(b, []).append((a, pi))
+
+    def end_node(end: str) -> tuple[int | None, str]:
+        q = end_points_mm.get(end)
+        if q is None:
+            return None, "no position (no stub end or fan join found for it)"
+        if not nodes:
+            return None, "no path in the plan"
+        best = min(range(len(nodes)), key=lambda i: norm(sub(nodes[i], q)))
+        d = norm(sub(nodes[best], q))
+        if d <= snap_mm:
+            return best, ""
+        return None, f"nearest path end {d:.1f} mm away"
+
+    def chain(a: int, b: int) -> list | None:
+        """Path indices from node a to node b, shortest by length (Dijkstra)."""
+        best = {a: 0.0}
+        prev: dict = {a: None}
+        heap = [(0.0, a)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u == b:
+                out = []
+                while prev[u] is not None:
+                    u, pi = prev[u]
+                    out.append(pi)
+                return out[::-1]
+            if d > best.get(u, float("inf")):
+                continue
+            for v, pi in adj.get(u, []):
+                nd = d + lengths[pi]
+                if nd < best.get(v, float("inf")):
+                    best[v] = nd
+                    prev[v] = (u, pi)
+                    heapq.heappush(heap, (nd, v))
+        return None
+
+    on_path: list = [[] for _ in paths_mm]
+    placed, outside, problems = [], [], []
+    for w in wires:
+        wname = str(w.get("name"))
+        ends = [str(w.get("from") or ""), str(w.get("to") or "")]
+        (a, why_a), (b, why_b) = end_node(ends[0]), end_node(ends[1])
+        if a is None and b is None:
+            outside.append(wname)
+            continue
+        if a is None or b is None:
+            off, why = (ends[0], why_a) if a is None else (ends[1], why_b)
+            problems.append(
+                {"wire": wname, "problem": f"end {off} not on the plan: {why}"}
+            )
+            continue
+        route = chain(a, b)
+        if route is None:
+            problems.append(
+                {
+                    "wire": wname,
+                    "problem": f"no chain of paths between {ends[0]} and {ends[1]}",
+                }
+            )
+            continue
+        placed.append(wname)
+        for pi in route:
+            on_path[pi].append(w)
+
+    out_paths = []
+    for pi, ws in enumerate(on_path):
+        ods = [float(w.get("diameter_mm") or 0.0) for w in ws]
+        dia, how = covering_diameter_mm(len(ws), ods, rule, default_mm)
+        if not ws:
+            problems.append({"path": names[pi], "problem": "carries no wire"})
+        out_paths.append(
+            {
+                "name": names[pi],
+                "wire_count": len(ws),
+                "wires": [str(w.get("name")) for w in ws],
+                "diameter_mm": round(dia, 4),
+                "sized_by": how,
+                "bundle_estimate_mm": round(bundle_estimate_mm(ods), 3) if ws else None,
+            }
+        )
+    return {
+        "paths": out_paths,
+        "placed": placed,
+        "outside": outside,
+        "problems": problems,
+    }
+
+
+def batches(items: list, size: int) -> list:
+    """items cut into consecutive lists of at most `size` (at least one list)."""
+    size = max(1, int(size))
+    return [items[i : i + size] for i in range(0, len(items), size)] or [[]]
+
+
+def merge_clearance_results(results: list, names: list, limit: int) -> dict:
+    """One check_path_clearance payload from the payloads of consecutive batches.
+    results: [(first global path index, payload)], names: every probed path's name (global
+    order). Interferences, ignored hits and unswept paths get the global `path` index and
+    `path_name`; counts are summed, `clear` is true only when every batch is clear."""
+    merged: dict = {"paths": 0, "path_length_mm": [], "interference_count": 0}
+    hits, ignored_hits, unswept, violations, ignored_viol = [], [], [], [], []
+    warnings, cleanup, probes, per_batch = [], [], [], []
+    clear = True
+    nearest = None
+    for start, pl in results:
+        n = int(pl.get("paths") or 0)
+        batch_names = names[start : start + n]
+        label_hits(pl, start, names)
+        merged["paths"] += n
+        merged.setdefault("assembly", pl.get("assembly"))
+        merged["path_length_mm"] += list(pl.get("path_length_mm") or [])
+        merged["interference_count"] += int(pl.get("interference_count") or 0)
+        hits += pl.get("interferences") or []
+        ignored_hits += pl.get("ignored_hits") or []
+        unswept += pl.get("unswept_paths") or []
+        violations += pl.get("clearance_violations") or []
+        ignored_viol += pl.get("ignored_violations") or []
+        warnings += pl.get("path_warnings") or []
+        cleanup += pl.get("cleanup") or []
+        if pl.get("probe_component"):
+            probes.append(pl["probe_component"])
+        if pl.get("nearest_mm") is not None and (
+            nearest is None or pl["nearest_mm"] < nearest[0]
+        ):
+            nearest = (pl["nearest_mm"], pl.get("nearest"))
+        ok = bool(pl.get("clear"))
+        clear = clear and ok
+        per_batch.append(
+            {
+                "paths": batch_names,
+                "clear": ok,
+                "interference_count": pl.get("interference_count"),
+            }
+        )
+        for k in ("neighbours_checked", "clearance_mm", "ignored", "note") + _PASS_KEYS:
+            if k not in pl:
+                continue
+            v, old = pl[k], merged.get(k)
+            if k == "ignored":
+                merged[k] = (old or 0) + int(v or 0)
+            elif old is None:
+                merged[k] = v
+            elif isinstance(v, list):
+                merged[k] = old + [x for x in v if x not in old]
+            elif isinstance(v, (int, float)) and isinstance(old, (int, float)):
+                merged[k] = max(old, v)
+            elif isinstance(v, str) and v not in str(old).split(" | "):
+                merged[k] = f"{old} | {v}"
+    merged["interferences"] = sorted(
+        hits, key=lambda h: -float(h.get("volume_mm3") or 0)
+    )[:limit]
+    if ignored_hits:
+        merged["ignored_hits"] = sorted(
+            ignored_hits, key=lambda h: -float(h.get("volume_mm3") or 0)
+        )[:limit]
+    if any("clearance_violations" in pl for _, pl in results):
+        merged["clearance_violations"] = violations
+    if ignored_viol:
+        merged["ignored_violations"] = ignored_viol
+    if nearest is not None:
+        merged["nearest_mm"], merged["nearest"] = nearest
+    if warnings:
+        merged["path_warnings"] = warnings
+    if unswept:
+        merged["unswept_paths"] = unswept
+    if probes:
+        merged["probe_components"] = probes
+    merged["batches"] = per_batch
+    merged["clear"] = clear
+    merged["cleanup"] = cleanup
+    return merged
+
+
+# Keys of a check_path_clearance payload passed on as they are (warnings of the inner check).
+_PASS_KEYS = (
+    "warning",
+    "lightweight_not_checked",
+    "resolved_from_lightweight_count",
+    "surface_only_count",
+    "surface_only_neighbours",
+    "surface_only_warning",
+    "not_measured_neighbours",
+)
+
+
+def label_hits(pl: dict, start: int, names: list) -> None:
+    """Global path index and path_name on a check_path_clearance payload's located items (in
+    place). The server numbers the paths of its own call from 0 and leaves `path` out when the
+    call had one path; path_warnings 'path <i>: ...' are renumbered too."""
+    n = int(pl.get("paths") or 1)
+
+    def name_of(g: int):
+        return names[g] if 0 <= g < len(names) else None
+
+    for key in ("interferences", "ignored_hits", "unswept_paths"):
+        for h in pl.get(key) or []:
+            if not isinstance(h, dict):
+                continue
+            local = h.get("path")
+            if not isinstance(local, int):
+                if n != 1:
+                    continue
+                local = 0
+            g = start + local
+            h["path"] = g
+            if name_of(g) is not None:
+                h["path_name"] = name_of(g)
+    ws = pl.get("path_warnings")
+    if isinstance(ws, list):
+        out = []
+        for w in ws:
+            s = str(w)
+            if s.startswith("path ") and ":" in s:
+                head, rest = s.split(":", 1)
+                try:
+                    g = start + int(head[5:])
+                    nm = name_of(g)
+                    s = f"path {g}" + (f" ({nm})" if nm else "") + ":" + rest
+                except ValueError:
+                    pass
+            out.append(s)
+        pl["path_warnings"] = out
 
 
 def group_interferences(items: list, limit: int) -> list:

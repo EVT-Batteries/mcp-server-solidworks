@@ -419,3 +419,42 @@ near / within / frame / kind / radius, sent by the adapter) and keeps them. Meas
 on a relay 198 s (was 590), next lugs on the same file 35-56 s (were 7-10 min); cache hits take
 milliseconds in the server. Open: the listing itself (93 s for 2,890 faces) is the floor of a
 first read; a disk cache keyed by file path + save time would carry it across server restarts.
+
+## Session 11 (tessellated occupancy, region boxes, sized probes, corridor search, timings)
+
+Four workflow bottlenecks from routing multi-branch harnesses in ~1,000-component assemblies:
+
+- **`occupancy_grid`** (`Services/SolidWorksService.Occupancy.cs`): voxelizes solid and surface
+  bodies of leaf parts whose world box touches `region` (in `frame_component` or top-assembly
+  coordinates). Minimises COM object crossings via `IComponent2.GetTessTriangles` (lightweight),
+  `IPartDoc.GetTessTriangles` (active configuration), or `IFace2.GetTessTriangles` fallback,
+  cached per `(file, configuration)` against `GetUpdateStamp()`, with exact separating-axis
+  triangle/box rasterization and optional Euclidean `dilate`.
+- **`component_status` region filter & box cache** (`Services/SolidWorksService.ComponentState.cs`):
+  `region`, `region_frame_component`, `leaves_only` prune sub-assemblies outside the box on the
+  server, with a per-assembly box cache keyed on `GetUpdateStamp()` (`box_cache`: `hit` | `built`).
+- **`plan_probe_sizes`, `check_path_clearance` batching, `route_follow` `timings_s`**
+  (`adapters/claude/assembly_math.py`, `server.py`): walks each from-to wire through the plan's
+  path tree (stub ends and fan joins) and writes a sized probe file (`paths_file`, `names`);
+  `check_path_clearance` splits selections larger than `max_paths` into batches, merges them, and
+  tags hits with `path_name`; `route_follow` reports per-step `timings_s`.
+- **`find_corridor`** (`adapters/claude/corridor.py`, `server.py`): pure-Python bitset dilation,
+  Kogge-Stone 6-connected flood fill, coarse-to-fine A*, string pulling, fillet-feasibility repair
+  and sampling over an `occupancy_grid` (or saved `grid_file`), outputting ranked candidates and
+  `probe_paths` ready for `check_path_clearance`.
+
+Verified offline (43 pytest passing, including contract sync for 81 tools and a 1,000,000-voxel
+synthetic corridor smoke test in ~5.6 s) and live read-only against a ~1,000-component assembly:
+- `component_status(region=..., leaves_only=True)`: 57 of 681 scanned components (`box_cache=hit`,
+  13.9 s on repeat call).
+- `occupancy_grid(resolution=0.002)`: 45x45x45 grid, 234,208 triangles across 55 parts, 13,338
+  occupied voxels in 24.8 s (dilated 4 mm: 32,841 voxels, 57 tessellation cache hits); surface
+  and hollow-interior checks matched model geometry.
+- `find_corridor` on the saved grid: 2 feasible candidates in 0.26 s (`74.2 mm` / `3.4 mm` min
+  clearance); `check_path_clearance` on the top candidate confirmed `clear=True` (0 interferences).
+- `plan_probe_sizes` on a 50-wire, 55-path route plan: 50/50 wires placed, 0 problems;
+  `check_path_clearance(paths_file=..., names=...)` probed 2 named paths cleanly (`clear=True`).
+
+Limits: `plan_probe_sizes` only creates graph nodes at path endpoints (not mid-path branch starts);
+`find_corridor` uses a uniform `bend_radius` per search; `route_follow` `timings_s` omits an open
+document count.

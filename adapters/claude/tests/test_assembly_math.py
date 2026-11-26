@@ -149,7 +149,11 @@ def test_seat_on_stud_takes_each_face_with_its_own_side():
     assert res["face"]["i"] == 6 and res["contact_face"]["i"] == 0
     assert close(res["delta_mm"], [0.0, 0.0, 0.1], 1e-6)
     sides = {f["i"]: f["side"] for f in res["other_faces"]}
-    assert sides[2] == "-axis" and res["face"]["normal"] == [0.0, 0.0, -1.0]  # stud axis is -Z
+    assert sides[2] == "-axis" and res["face"]["normal"] == [
+        0.0,
+        0.0,
+        -1.0,
+    ]  # stud axis is -Z
     below = _seat(lug, dev, face_index=2)
     assert below["contact_face"]["i"] == 1 and close(
         below["delta_mm"], [0, 0, -2.0], 1e-6
@@ -230,3 +234,162 @@ def test_hole_centre_is_the_ring_hole():
     lug = _lug(0.05, 0.002, 0.003)
     assert am.hole_centre(lug) == [0.05, 0.002, 0.003]  # not the barrel along X
     assert am.hole_centre([lug[3]]) is None
+
+
+# A small plan (mm): trunk T from a fan join, branches A and B, a single-wire branch S after B,
+# and an isolated path D. Plug-1 (REF P1) is fanned out at the trunk start.
+PLAN_MM = [
+    {"name": "T", "points": [[0, 0, 0], [50, 0, 0], [100, 0, 0]]},
+    {"name": "A", "points": [[100, 0, 0], [150, 50, 0]]},
+    {"name": "B", "points": [[100, 0, 0], [150, -50, 0]]},
+    {"name": "S", "points": [[150, -50, 0], [200, -50, 0]]},
+    {"name": "D", "points": [[300, 0, 0], [400, 0, 0]]},
+]
+STUBS = [
+    {"end": f"P1.{k}", "component": "Sub-1/Plug-1", "stub_end_mm": [-20, k, 0]}
+    for k in (1, 2, 3, 4)
+] + [
+    {"end": "J1.1", "component": "Sub-1/Rec-1", "stub_end_mm": [150.5, 50, 0]},
+    {"end": "J1.2", "component": "Sub-1/Rec-1", "stub_end_mm": [150, 50.4, 0]},
+    {"end": "J2.1", "component": "Rec-2", "stub_end_mm": [150, -50.3, 0]},
+    {"end": "J2.2", "component": "Rec-2", "stub_end_mm": [150, -50, 0]},
+    {"end": "J3.1", "component": "Rec-3", "stub_end_mm": [200, -50, 0]},
+    {"end": "K1.1", "component": "Rec-4", "stub_end_mm": [300, 0, 0]},
+]
+FANS = [
+    {"connector": "Plug-1", "pins": ["1", "2", "3", "4"], "join_mm": [0.3, 0, 0]},
+    {"connector": "Plug-9", "pins": ["1"], "join_mm": [9, 9, 9]},
+]
+WIRES = [
+    {"name": "W1", "from": "P1.1", "to": "J1.1", "diameter_mm": 1.6},
+    {"name": "W2", "from": "J1.2", "to": "P1.2", "diameter_mm": 1.6},
+    {"name": "W3", "from": "P1.3", "to": "J2.1", "diameter_mm": 1.6},
+    {"name": "W4", "from": "J2.2", "to": "J3.1", "diameter_mm": 1.8},
+    {"name": "W5", "from": "P1.4", "to": "X9.1", "diameter_mm": 1.6},  # one end unknown
+    {"name": "W6", "from": "Q1.1", "to": "Q2.1", "diameter_mm": 1.6},  # another stage
+    {"name": "W7", "from": "K1.1", "to": "J3.1", "diameter_mm": 1.6},  # no chain
+]
+RULE_MM = [[2, 6.0], [3, 9.3]]
+
+
+def test_wire_end_points_use_fan_joins_and_map_instances_to_refs():
+    ends, problems = am.wire_end_points_mm(STUBS, FANS)
+    assert ends["P1.3"] == [0.3, 0.0, 0.0]  # fan join replaces the stub end
+    assert ends["J1.1"] == [150.5, 50.0, 0.0]
+    assert [p["fan"] for p in problems] == ["Plug-9"]
+    # a join given in metres only
+    ends2, _ = am.wire_end_points_mm(
+        STUBS, [{"connector": "sub-1/plug-1", "pins": ["2"], "join": [0.001, 0, 0]}]
+    )
+    assert ends2["P1.2"] == [1.0, 0.0, 0.0] and ends2["P1.1"] == [-20.0, 1.0, 0.0]
+
+
+def test_size_paths_by_wire_sets_counts_and_sizes():
+    ends, _ = am.wire_end_points_mm(STUBS, FANS)
+    r = am.size_paths_by_wire_sets(PLAN_MM, WIRES, ends, RULE_MM, 5.0, 1.0)
+    by = {p["name"]: p for p in r["paths"]}
+    assert by["T"]["wires"] == ["W1", "W2", "W3"] and by["T"]["diameter_mm"] == 9.3
+    assert by["T"]["sized_by"] == "covering"
+    assert by["A"]["wire_count"] == 2 and by["A"]["diameter_mm"] == 6.0
+    assert by["B"]["wires"] == ["W3"] and by["B"]["diameter_mm"] == 1.6
+    assert by["B"]["sized_by"] == "wire"
+    assert by["S"]["wires"] == ["W4"] and by["S"]["diameter_mm"] == 1.8
+    assert by["D"]["wire_count"] == 0 and by["D"]["diameter_mm"] == 5.0
+    assert by["D"]["sized_by"] == "default"
+    assert r["placed"] == ["W1", "W2", "W3", "W4"]
+    assert r["outside"] == ["W6"]  # no end on these paths: not an error
+    probs = {p.get("wire") or p.get("path"): p["problem"] for p in r["problems"]}
+    assert set(probs) == {"W5", "W7", "D"}
+    assert "X9.1" in probs["W5"] and "no position" in probs["W5"]
+    assert "no chain" in probs["W7"]
+    json.dumps(r)
+
+
+def test_size_paths_snap_and_stage_subset():
+    ends, _ = am.wire_end_points_mm(STUBS, FANS)
+    # J1.1 sits 0.5 mm off A's end: off the plan with a 0.4 mm snap (the join 0.3 mm: on)
+    r = am.size_paths_by_wire_sets(PLAN_MM, WIRES, ends, RULE_MM, 5.0, 0.4)
+    probs = {p.get("wire"): p["problem"] for p in r["problems"] if p.get("wire")}
+    assert "nearest path end 0.5 mm" in probs["W1"]
+    # a stage holding only S: W4 placed, the trunk wires have no end on it
+    r = am.size_paths_by_wire_sets([PLAN_MM[3]], WIRES, ends, RULE_MM, 5.0, 1.0)
+    assert r["placed"] == ["W4"]
+    assert set(r["outside"]) == {"W1", "W2", "W5", "W6"}
+    assert {p["wire"] for p in r["problems"]} == {
+        "W3",
+        "W7",
+    }  # one end each on S's ends
+
+
+def test_covering_diameter_rule_and_estimates():
+    assert am.covering_diameter_mm(30, [], [[24, 11.5], [9, 9.3]], 6.0) == (
+        11.5,
+        "covering",
+    )
+    assert am.covering_diameter_mm(9, [], [[24, 11.5], [9, 9.3]], 6.0)[0] == 9.3
+    d, how = am.covering_diameter_mm(4, [1.0] * 4, [[24, 11.5]], 6.0)
+    assert how == "bundle_estimate" and math.isclose(d, 2.3)
+    assert am.covering_diameter_mm(1, [1.4], [[2, 6.0]], 6.0) == (1.4, "wire")
+    assert am.covering_diameter_mm(1, [0.0], [], 6.0) == (6.0, "default")
+    assert am.covering_diameter_mm(0, [], [[0, 3.0]], 6.0) == (6.0, "default")
+
+
+def test_batches():
+    assert am.batches([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]
+    assert am.batches([], 3) == [[]]
+
+
+def test_merge_clearance_results_global_indices_and_names():
+    names = ["T", "A", "B", "S", "D"]
+    b1 = {
+        "assembly": "Top",
+        "paths": 2,
+        "path_length_mm": [100.0, 70.7],
+        "neighbours_checked": 4,
+        "interference_count": 1,
+        "interferences": [{"component": "Box-1", "volume_mm3": 2.0, "path": 1}],
+        "path_warnings": ["path 1: corner 0 drawn sharp"],
+        "clear": False,
+        "cleanup": ["probe part closed"],
+    }
+    b2 = {
+        "paths": 2,
+        "path_length_mm": [70.7, 50.0],
+        "neighbours_checked": 6,
+        "interference_count": 1,
+        "interferences": [{"component": "Box-2", "volume_mm3": 5.0, "path": 0}],
+        "ignored": 1,
+        "ignored_hits": [{"component": "Rec-1", "volume_mm3": 0.1, "path": 1}],
+        "clear": False,
+    }
+    b3 = {
+        "paths": 1,
+        "path_length_mm": [100.0],
+        "interference_count": 0,
+        "interferences": [],
+        "unswept_paths": [{"path": 0, "error": "sweep failed"}],
+        "clear": False,
+    }
+    m = am.merge_clearance_results([(0, b1), (2, b2), (4, b3)], names, 50)
+    assert m["paths"] == 5 and m["interference_count"] == 2
+    assert len(m["path_length_mm"]) == 5 and m["neighbours_checked"] == 6
+    assert [
+        (h["component"], h["path"], h["path_name"]) for h in m["interferences"]
+    ] == [
+        ("Box-2", 2, "B"),
+        ("Box-1", 1, "A"),
+    ]
+    assert m["ignored"] == 1 and m["ignored_hits"][0]["path_name"] == "S"
+    assert m["unswept_paths"] == [
+        {"path": 4, "error": "sweep failed", "path_name": "D"}
+    ]
+    assert m["path_warnings"] == ["path 1 (A): corner 0 drawn sharp"]
+    assert m["clear"] is False and [b["paths"] for b in m["batches"]] == [
+        ["T", "A"],
+        ["B", "S"],
+        ["D"],
+    ]
+    clear = {"paths": 1, "interference_count": 0, "interferences": [], "clear": True}
+    assert am.merge_clearance_results(
+        [(0, dict(clear)), (1, dict(clear))], ["a", "b"], 5
+    )["clear"]

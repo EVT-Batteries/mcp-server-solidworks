@@ -125,6 +125,7 @@
     <Compile Include="Services\SolidWorksService.FaceCache.cs" />
     <Compile Include="Services\SolidWorksService.RouteCovering.cs" />
     <Compile Include="Services\SolidWorksService.RouteFlatten.cs" />
+    <Compile Include="Services\SolidWorksService.Occupancy.cs" />
     <Compile Include="Startup.cs" />
   </ItemGroup>
   <ItemGroup>

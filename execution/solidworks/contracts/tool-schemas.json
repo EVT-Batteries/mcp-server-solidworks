@@ -465,10 +465,31 @@
     "limit": "integer (optional, default 500 — maximum entries listed)",
     "boxes": "boolean (optional, default false - world bounding box per component, box_mm)",
     "time_budget_s": "number (optional, default 60, 0 = none - stop listing / mate scans after this many seconds, truncated=true)",
-    "fields": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): comma-separated keys kept per component)"
+    "fields": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): comma-separated keys kept per component)",
+    "region": "string or array (optional - JSON [x0,y0,z0,x1,y1,z1] (m): keep only components whose world box (IComponent2.GetBox) overlaps it; the tree is walked from the top and sub-assemblies outside it are not descended; implies boxes)",
+    "region_frame_component": "string (optional - instance path whose coordinates region is in; its 8 corners are mapped by Transform2 and their AABB used; default the top assembly)",
+    "leaves_only": "boolean (optional, default false - with region: drop components that have children)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, reference?, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, components_scanned, returned, components:[{component, suppression, file, file_missing?, configuration, reference?, hidden?, fixed?, envelope?, parent_suppressed?, excluded_from_bom?, transform?, mates?:[{name, type, suppressed?, severity?, code?, meaning?, components}], broken_mates?}], counts_by_state?, not_found?, truncated_at?}. With boxes: box_mm per component; truncated / truncated_reason when time_budget_s was reached. With boxes or region: box_cache ('hit' = boxes reused from the per-assembly cache keyed on IModelDoc2.GetUpdateStamp, 'built'). With region: region {region, frame, world_box, leaves_only, outside}; counts_by_state covers the kept components (no_box = components without a box)."
+ },
+ "occupancy_grid": {
+  "description": "Voxel occupancy of a box region of the active assembly from the real tessellated geometry: leaf parts whose world box (IComponent2.GetBox, cached per assembly update stamp) touches the region are found by a pruned walk of the tree; their triangles come from IComponent2.GetTessTriangles (lightweight components), IPartDoc.GetTessTriangles (resolved parts whose active configuration is the referenced one) or IFace2.GetTessTriangles per face of the solid and sheet bodies (GetBodies3); triangles are cached per (file, configuration) in part coordinates against the model update stamp; each triangle marks the voxels it overlaps (separating-axis triangle/box test); optional Euclidean dilation (exact distance transform). Lightweight sub-assemblies in the region and lightweight parts without tessellation are resolved (resolved_from_lightweight). Does NOT increment state_version.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "region": "string or array (required - JSON [x0,y0,z0,x1,y1,z1] (m), in frame_component's coordinates when given)",
+    "resolution": "number (optional, default 0.002 - voxel edge (m); more than 8,000,000 voxels fails with GRID_TOO_LARGE)",
+    "frame_component": "string (optional - instance path of a component whose coordinates region and output are in; default the top assembly)",
+    "ignore": "string or array (optional - JSON list of instance-path fragments to leave out)",
+    "include_hidden": "boolean (optional, default false - also voxelize hidden components; suppressed ones are always skipped)",
+    "dilate": "number (optional, default 0 - also mark voxels whose centre lies within this distance (m) of an occupied voxel's centre)",
+    "time_budget_s": "number (optional, default 300, 0 = none - components left when it runs out are listed in not_processed, truncated=true)",
+    "out_path": "string (optional; ADAPTER-SIDE (the adapter writes the full result JSON to this file and returns it without occupied_rle))"
+   }
+  },
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {frame ('world' | frame_component), origin [x0,y0,z0], resolution, dims [nx,ny,nz], occupied_rle [[start, count], ...] (sorted runs over i = ix + nx*(iy + ny*iz)), occupied_count, components [{component, voxels}] (voxels desc, at most 200), skipped_lightweight [...], triangles, elapsed_s, assembly, region, region_world_box, dilate, occupied_before_dilate, components_with_voxels, leaf_components, components_scanned, triangles_read, tessellation_sources {part | lightweight_local | lightweight_world | faces_local | faces_world | ...: n}, tessellation_cache_hits, box_cache, walk_s, frame_transform?, ignore?, no_tessellation? [{component, reason}], box_mismatch? [{component, source, gap_mm}], truncated?, truncated_reason?, not_processed?, resolved_from_lightweight?}. Fails with GRID_TOO_LARGE, INVALID_PARAMETER, COMPONENT_NOT_FOUND (frame_component), WRONG_DOCUMENT_TYPE."
  },
  "file_dependencies": {
   "description": "Lists the files a part, assembly or drawing references, down the whole tree, WITHOUT opening it (ISldWorks.GetDocumentDependencies2 per file, one level per call, resolved with SOLIDWORKS' search rules). Each file: sync state from its Windows attributes (local, always_keep = pinned, cloud_only = placeholder downloaded on first read, missing), read-only attribute, SOLIDPILOT_READONLY_PATHS match, the documents that reference it, and the same-name drawings next to each model (the drawings Pack and Go includes). Cloud-only files are not read unless read_cloud_only. Does NOT increment state_version.",
@@ -963,8 +984,10 @@
     "ignore_same_parent": "boolean (optional, default false)",
     "limit": "integer (optional, default 50)",
     "keep_probe": "boolean (optional, default false - leave the probe component in the assembly)",
-    "max_paths": "integer (optional, default 24 - more paths in one probe are refused: split the call)",
-    "frame_component": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): points / paths are in this component's frame, mapped to the active assembly first)"
+    "max_paths": "integer (optional, default 24 - more paths in one probe are refused by the server; the adapter splits a larger selection into batches of max_paths and merges the results)",
+    "frame_component": "string (optional; ADAPTER-SIDE (applied by the adapter to the execution server's result): points / paths are in this component's frame, mapped to the active assembly first)",
+    "paths_file": "string (optional; ADAPTER-SIDE: a JSON file whose paths are probed instead of points / paths - plan_probe_sizes probe_out or a route_path plan; paths without diameter take diameter; sent to the server as paths)",
+    "names": "string (optional; ADAPTER-SIDE: JSON list of path names - probe only those paths of paths_file / paths)"
    }
   },
   "output": "→ see execution-response.json — Features[0] = JSON {assembly, paths, path_length_mm[], neighbours_checked, interference_count, interferences:[{component, volume_mm3, box_mm, path?, leg, leg_points, at_mm_along_path, near_corner?}], clearance_mm?, clearance_violations?, nearest_mm?, nearest?, ignored?, path_warnings?, unswept_paths?:[{path, error}], warning?, clear, probe_component?, note?, cleanup} ignored / ignored_hits / ignored_violations: hits of ignored components, located on the path like the others but left out of `clear`."
@@ -1239,6 +1262,46 @@
     "max_kink_deg": "number (optional, default 15)"
    }
   },
-  "output": "COMPLETED | route_follow | {route, import?, candidates, moves, dry_run, drawn?, coverings?, status?, csv?}"
+  "output": "COMPLETED | route_follow | {route, import?, candidates, moves, dry_run, drawn?, coverings?, status?, csv?, timings_s {export_coverings?, import?, follow, dry_run, draw?, coverings_import?, status?, total}}"
+ },
+ "plan_probe_sizes": {
+  "description": "ADAPTER-SIDE (routing_status check_stubs, route_path fan_out dry run; read-only): walks every from-to wire of the route through the plan's path tree (nodes = path ends within snap_mm; a wire end enters at its connector's fan join, else its stub end), counts the wires per path and sizes each path by covering_rule (largest min_wires <= count; no match: the single wire's OD or 1.15*sqrt(sum OD^2)); writes probe_out for check_path_clearance(paths_file).",
+  "input": {
+   "params": {
+    "route": "string (required — the route sub-assembly)",
+    "plan": "string (required — JSON {fan_out, paths} or a .json file path, active assembly coordinates)",
+    "covering_rule": "string (optional, default '[]' — JSON [[min_wires, outside_diameter_m], ...])",
+    "default_diameter": "number (optional, default 0.006 m — a path carrying no wire)",
+    "probe_out": "string (optional — probe JSON, default <plan>.probe.json)",
+    "snap_mm": "number (optional, default 1.0 — path end / wire end snapping)",
+    "max_kink_deg": "number (optional, default 15 — as route_path, for the fan dry run)"
+   }
+  },
+  "output": "COMPLETED | plan_probe_sizes | {route, paths, diameters_mm, path_sizes, wires, placed, outside, outside_wires?, problems_count, problems, stubs_not_found?, probe_out}"
+ },
+ "find_corridor": {
+  "description": "ADAPTER-SIDE (calls occupancy_grid unless grid_file is given, then pure-Python corridor planner; read-only): finds up to max_candidates diverse, bend-radius-feasible filleted polylines from start to end through the real tessellated free space.",
+  "input": {
+   "params": {
+    "start": "string (required — JSON [x,y,z] m)",
+    "start_dir": "string (required — JSON [dx,dy,dz] direction leaving start)",
+    "end": "string (required — JSON [x,y,z] m)",
+    "end_dir": "string (required — JSON [dx,dy,dz] direction arriving at end)",
+    "diameter": "number (required, > 0 — bundle outer diameter, m)",
+    "bend_radius": "number (required, >= 0 — corner tangent fillet radius, m)",
+    "clearance": "number (optional, default 0.001 m — obstacle inflation margin)",
+    "lead": "number (optional — straight lead length at start/end, default bend_radius, m)",
+    "region": "string (optional — JSON [x0,y0,z0,x1,y1,z1] m; default auto-padded start..end box)",
+    "margin": "number (optional, default 0.06 m — minimum auto-region padding)",
+    "resolution": "number (optional, default 0.002 m — occupancy voxel edge)",
+    "frame_component": "string (optional — instance path whose coordinates start/end/region are in)",
+    "ignore": "string (optional, default '[]' — JSON list of instance-path fragments passed to occupancy_grid)",
+    "max_candidates": "integer (optional, default 3 — max distinct candidates returned)",
+    "grid_file": "string (optional — saved occupancy_grid JSON to reuse instead of calling SolidWorks)",
+    "save_grid": "string (optional — path to write the fetched occupancy_grid JSON)",
+    "time_budget_s": "number (optional, default 60 — search time budget, s)"
+   }
+  },
+  "output": "COMPLETED | find_corridor | {frame, candidates[{points, bend_radii, length_mm, corners, deflections_deg, min_straight_mm, min_clearance_mm, ...}], probe_paths, grid_stats{dims, occupied_count, resolution_mm, grid_s, search_s, inflate_s, flood_s, elapsed_s, coarse_voxels_per_cell, expansions}, warnings, rejected, saved_grid?, grid_file?}"
  }
 }

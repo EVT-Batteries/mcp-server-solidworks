@@ -445,6 +445,19 @@ Results are in `$r.cadState.features` (often one JSON string).
   (`prefilter` {near, within, frame, kind, radius_min / max}, sent by the adapter's face filters
   and `seat_on_stud`) and kept; any instance of the same file then answers without per-face COM
   calls. The result reports `face_cache` {status hit / listed, list_s, records_built}.
+- **Tessellation in few COM calls (`Services/SolidWorksService.Occupancy.cs`)**:
+  `IComponent2.GetTessTriangles` (lightweight only, per the API help),
+  `IPartDoc.GetTessTriangles` (one call per file when active configuration matches), and
+  `IFace2.GetTessTriangles` per solid/sheet body face as fallback; `ITessellation` is per-vertex
+  and too slow across processes. `occupancy_grid` infers the triangle frame against `GetBox` and
+  caches triangles per `(file, configuration)` against `GetUpdateStamp()`, while
+  `component_status(region=...)` shares the per-assembly box cache.
+- **Sized probes, corridor search and draw timings**:
+  - Size probes like the drawn route with `plan_probe_sizes(route, plan, covering_rule)` and pass
+    its output to `check_path_clearance(paths_file=...)` (auto-batched at `max_paths`).
+  - Use `find_corridor` over `occupancy_grid` (or a saved `grid_file`) to propose
+    bend-radius-feasible polylines before probing.
+  - `route_follow` returns per-step `timings_s` to isolate slow draws vs imports/status.
 
 ## Committing
 
