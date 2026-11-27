@@ -458,6 +458,15 @@ Results are in `$r.cadState.features` (often one JSON string).
   - Use `find_corridor` over `occupancy_grid` (or a saved `grid_file`) to propose
     bend-radius-feasible polylines before probing.
   - `route_follow` returns per-step `timings_s` to isolate slow draws vs imports/status.
+- **Session-PID cache invalidation & face liveness (2026-11-26)**: static COM/geometry caches
+  (`_faceCache`, `_boxCache`, `_tessCache`) persist in `SolidworksExecution.exe` even when
+  `SLDWORKS.EXE` restarts. `SyncCachesToSwPid` clears all three caches whenever the attached
+  SolidWorks process ID changes, and `ComponentFacesCached` probes `e.Faces[0].Face.GetBox()` on a
+  cache hit so stale COM face handles from a closed/reopened document are dropped and re-listed.
+- **Auto-resolving on configuration switch (2026-11-26)**: `set_component_state` automatically
+  calls `ResolveForGeometry` (by `ComponentIdChain`) before setting `ReferencedConfiguration` when
+  target suppression is not suppressed/lightweight, reporting `auto_resolved` and
+  `resolved_from_lightweight`.
 
 ## Committing
 

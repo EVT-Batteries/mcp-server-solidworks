@@ -846,7 +846,8 @@ def set_component_state(
     state_version; does NOT save. components: JSON list of names or instance paths
     ("Sub-1/Part-1"); if any is not found nothing changes. suppression: 'suppressed', 'resolved'
     (= unsuppress), 'lightweight' or 'fully_resolved'; visible: true shows, false hides;
-    referenced_configuration: a configuration name of the component's own file. A component inside
+    referenced_configuration: a configuration name of the component's own file (lightweight
+    components and lightweight parents are resolved automatically first). A component inside
     a suppressed sub-assembly fails until that sub-assembly is resolved (resolve the parent first).
     Changing a nested component edits its sub-assembly's active configuration, so that
     sub-assembly file is modified too: work on local copies only. Rebuilds, then returns per
@@ -854,8 +855,9 @@ def set_component_state(
     component_status). Run check_rebuild before saving: it reports broken mates of the whole tree.
     include_mates=True adds each component's mates to that report: on an assembly of ~1000
     components the mate scan takes minutes per component, bounded by time_budget_s.
-    compact=True: counts instead of the per-component lists (changes_count, components_count),
-    keeping only the changes that did not succeed (result other than ok, or an error)."""
+    compact=True: counts instead of the per-component lists (changes_count, components_count,
+    resolved_from_lightweight_count), keeping only the changes that did not succeed (result other
+    than ok, or an error)."""
     params: dict = {"components": components, "suppression": suppression,
                     "include_mates": include_mates, "time_budget_s": time_budget_s}
     if visible is not None:
@@ -868,6 +870,8 @@ def set_component_state(
     _keep_problems(pl, "changes", lambda c: c.get("result", "ok") == "ok"
                    and not any(k.endswith("error") for k in c))
     pl["components_count"] = len(pl.pop("components", None) or [])
+    if isinstance(pl.get("resolved_from_lightweight"), list):
+        pl["resolved_from_lightweight_count"] = len(pl.pop("resolved_from_lightweight"))
     pl.pop("note", None)
     return _text_with(raw, pl)
 
@@ -2127,8 +2131,9 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         CutLength_mm, MinArcRadius_mm, MaxKink_deg, Errors (+ TotalCutLength_mm with
         terminations), one row per wire in wire-number order, csv_note as a '# ' first line.
     compare_to: an earlier CSV of the same table (e.g. the file being replaced: it is read
-        before it is overwritten): adds Previous_mm and Delta_mm per wire (its CutLength_mm), and
-        the result reports the wires that changed by more than 1 mm.
+        before it is overwritten; accepts 'CutLength_mm' or legacy 'Routed_mm'): adds
+        Previous_mm and Delta_mm per wire, and reports wires that changed by more than 1 mm
+        (or warns if compare_to had 0 matching rows).
     check_stubs (with route, default on): route.stub_check lists every connection point the
     route's wires use (end 'REF.pin', component, location_mm, stub_end_mm, direction, offset_mm =
     distance from the connection point to the nearest point of the route sketch) and `detached`:
@@ -2171,7 +2176,10 @@ def routing_status(route: str = "", verbose: bool = False, connectors: str = "",
         text = _text_with(raw, pl)
     text += f" | csv={csv_path} rows={rows}"
     if compare_to.strip():
-        text += f" | changed_over_1mm={len(changed)}: {', '.join(changed)}"
+        if not previous:
+            text += " | changed_over_1mm=0 (compare_to had 0 matching rows)"
+        else:
+            text += f" | changed_over_1mm={len(changed)}: {', '.join(changed)}"
     return text
 
 
@@ -2195,13 +2203,17 @@ def _wire_sort_key(name: str):
 
 
 def _read_wire_csv(path: str) -> dict:
-    """{wire: CutLength_mm} from a wire table CSV ('#' lines skipped, columns by header name)."""
+    """{wire: length_mm} from a wire table CSV ('#' lines skipped; CutLength_mm or Routed_mm)."""
     with open(path, encoding="utf-8-sig", newline="") as fh:
         lines = [ln for ln in fh if not ln.startswith("#")]
     out = {}
     for row in csv.DictReader(lines):
+        raw = row.get("CutLength_mm")
+        if raw in (None, ""):
+            raw = row.get("Routed_mm")
         try:
-            out[row["Wire"]] = float(row["CutLength_mm"])
+            if row.get("Wire") and raw not in (None, ""):
+                out[row["Wire"]] = float(raw)
         except (KeyError, TypeError, ValueError):
             continue
     return out
@@ -2974,7 +2986,10 @@ def route_follow(
         rows, changed = _write_wire_csv(csv_path, rw, previous, csv_note)
         summary["csv"] = {"path": csv_path, "rows": rows}
         if compare_to.strip():
-            summary["csv"]["changed_over_1mm"] = changed
+            if not previous:
+                summary["csv"]["compare_unmatched"] = True
+            else:
+                summary["csv"]["changed_over_1mm"] = changed
     return done()
 
 

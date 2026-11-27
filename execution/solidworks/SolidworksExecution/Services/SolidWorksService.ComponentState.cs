@@ -257,12 +257,15 @@ namespace SolidworksExecution.Services
                         "MISSING_PARAMETER", "Give suppression, visible and / or referenced_configuration.");
 
                 // Resolve every name first, so a typo changes nothing.
+                _autoResolved.Clear();
                 var comps = new List<IComponent2>();
+                var idChains = new List<List<int>>();
                 var missing = new JArray();
                 foreach (var n in wanted)
                 {
                     var c = FindComponentByName(asm, n);
-                    if (c == null) missing.Add(n); else comps.Add(c);
+                    if (c == null) missing.Add(n);
+                    else { comps.Add(c); idChains.Add(ComponentIdChain(c)); }
                 }
                 if (missing.Count > 0)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
@@ -271,8 +274,10 @@ namespace SolidworksExecution.Services
 
                 var changes = new JArray();
                 bool anyFailed = false;
-                foreach (var c in comps)
+                for (int i = 0; i < comps.Count; i++)
                 {
+                    var c = ComponentByIdChain(asm, idChains[i]) ?? comps[i];
+                    comps[i] = c;
                     string path = ComponentPath(c);
                     var cj = new JObject { ["component"] = path, ["before"] = SuppressionName(c) };
                     if (target >= 0)
@@ -294,17 +299,38 @@ namespace SolidworksExecution.Services
                     }
                     if (!string.IsNullOrEmpty(refConfig))
                     {
-                        // The component's file must have that configuration; it applies to the active
-                        // configuration of the assembly holding the component.
-                        try
+                        // Lightweight components (and lightweight parents) must be resolved before
+                        // SOLIDWORKS will apply ReferencedConfiguration cleanly.
+                        bool applyCfg = true;
+                        if (target != 0 && target != 1)
                         {
-                            c.ReferencedConfiguration = refConfig;
-                            string now = c.ReferencedConfiguration;
-                            cj["referenced_configuration"] = now;
-                            if (!string.Equals(now, refConfig, StringComparison.OrdinalIgnoreCase))
-                            { cj["configuration_error"] = "not applied (does the component's file have that configuration?)"; anyFailed = true; }
+                            int beforeAuto = _autoResolved.Count;
+                            var resolved = ResolveForGeometry(asm, c, out string rCode, out string rMsg);
+                            if (resolved == null)
+                            {
+                                cj["configuration_error"] = rMsg;
+                                anyFailed = true;
+                                applyCfg = false;
+                            }
+                            else
+                            {
+                                c = resolved;
+                                comps[i] = c;
+                                if (_autoResolved.Count > beforeAuto) cj["auto_resolved"] = true;
+                            }
                         }
-                        catch (Exception ex) { cj["configuration_error"] = ex.Message; anyFailed = true; }
+                        if (applyCfg)
+                        {
+                            try
+                            {
+                                c.ReferencedConfiguration = refConfig;
+                                string now = c.ReferencedConfiguration;
+                                cj["referenced_configuration"] = now;
+                                if (!string.Equals(now, refConfig, StringComparison.OrdinalIgnoreCase))
+                                { cj["configuration_error"] = "not applied (does the component's file have that configuration?)"; anyFailed = true; }
+                            }
+                            catch (Exception ex) { cj["configuration_error"] = ex.Message; anyFailed = true; }
+                        }
                     }
                     if (visible.HasValue && SafeSuppression(c) != 0)
                     {
@@ -319,7 +345,11 @@ namespace SolidworksExecution.Services
                 // State after the rebuild, mates included: a resolved component shows its broken mates.
                 var after = new JArray();
                 var deadlineSet = budgetSet > 0 ? DateTime.UtcNow.AddSeconds(budgetSet) : DateTime.MaxValue;
-                foreach (var c in comps) after.Add(ComponentStatusJson(c, includeMatesAfter && DateTime.UtcNow < deadlineSet, false, deadlineSet));
+                for (int i = 0; i < comps.Count; i++)
+                {
+                    var c = ComponentByIdChain(asm, idChains[i]) ?? comps[i];
+                    after.Add(ComponentStatusJson(c, includeMatesAfter && DateTime.UtcNow < deadlineSet, false, deadlineSet));
+                }
 
                 var result = new JObject
                 {
@@ -330,6 +360,8 @@ namespace SolidworksExecution.Services
                     ["configuration"] = (modelDoc.GetActiveConfiguration() as IConfiguration)?.Name,
                     ["note"] = "Not saved. Applies to the active configuration only. Changing a nested component edits its sub-assembly's active configuration. Run check_rebuild before saving.",
                 };
+                if (_autoResolved.Count > 0)
+                    result["resolved_from_lightweight"] = new JArray(_autoResolved);
 
                 var response = new ExecutionResponse
                 {

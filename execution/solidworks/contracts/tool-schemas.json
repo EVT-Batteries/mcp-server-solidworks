@@ -517,13 +517,13 @@
     "components": "string or array (required — JSON list of component names or instance paths)",
     "suppression": "string (optional — suppressed | resolved | lightweight | fully_resolved; 'unsuppress' = resolved)",
     "visible": "boolean (optional — true shows, false hides)",
-    "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration)",
+    "referenced_configuration": "string (optional — configuration of the component's own file to use, IComponent2.ReferencedConfiguration; lightweight components and parents are resolved automatically first)",
     "include_mates": "boolean (optional, default false - mates of each component in the report after the change)",
     "time_budget_s": "number (optional, default 60 - bound on the mate scans of the report)",
     "compact": "boolean (optional, default false; ADAPTER-SIDE (applied by the adapter to the execution server's result): counts, failed changes only)"
    }
   },
-  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included unless include_mates=false], all_ok, note}."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {assembly, configuration, changes:[{component, before, result, reason?, auto_resolved?, visible_set?, referenced_configuration?, configuration_error?}], components:[status as component_status, mates included unless include_mates=false], resolved_from_lightweight?, all_ok, note}."
  },
  "manage_configurations": {
   "description": "Lists, adds (IModelDoc2.AddConfiguration3, swConfigOption_DontActivate when activate=false), activates (ShowConfiguration2), renames (IConfiguration.Name), deletes (DeleteConfiguration2) or sets properties (Description, SuppressNewComponentModels) of the configurations of the active document. 'list' does NOT increment state_version; the other actions do. Never saves.",
@@ -1017,7 +1017,7 @@
     "terminations": "string (optional - JSON {\"<REF>.<pin>\" | \"<REF>\" | \"*\": allowance_mm | {allowance_mm, strip_mm, ...}}: per-end wire length beyond the route end; adds termination and total_cut_length_mm to each wire)",
     "max_kink_deg": "number (optional, degrees, default 15 - a wire turning more than this at a node of its path (where its route segments meet, or a corner without an arc inside one) is listed in sharp_bends: SOLIDWORKS checks arcs only)",
     "csv_path": "string (optional, ADAPTER-SIDE, not sent to the execution server - with route: write the wire table (Wire, From, To, Spec, CutLength_mm, MinArcRadius_mm, MaxKink_deg, Errors[, TotalCutLength_mm]) to this CSV)",
-    "compare_to": "string (optional, ADAPTER-SIDE - an earlier wire table CSV: adds Previous_mm / Delta_mm and lists the wires changed by more than 1 mm)",
+    "compare_to": "string (optional, ADAPTER-SIDE - an earlier wire table CSV (CutLength_mm or Routed_mm): adds Previous_mm / Delta_mm, lists wires changed by more than 1 mm, or notes when 0 rows matched)",
     "csv_note": "string (optional, ADAPTER-SIDE - a '# ' comment first line for the CSV)",
     "check_stubs": "boolean (optional, default false here, true from the adapter when route is given — route.stub_check: the connection points the wires use, offset_mm from the route sketch, detached ones)",
     "stub_tolerance_mm": "number (optional, default 0.05 — offset above which a stub counts as detached)",

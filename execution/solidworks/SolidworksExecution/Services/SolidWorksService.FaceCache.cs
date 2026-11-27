@@ -49,11 +49,19 @@ namespace SolidworksExecution.Services
         private static readonly Dictionary<string, FaceCacheEntry> _faceCache =
             new Dictionary<string, FaceCacheEntry>(StringComparer.OrdinalIgnoreCase);
 
+        private static int ClearFaceCache()
+        {
+            int n = _faceCache.Count;
+            _faceCache.Clear();
+            return n;
+        }
+
         // The component's faces (records built lazily), from the cache when the file's update stamp
         // is unchanged. status: "hit" or "listed"; listSeconds: the time the listing took.
         private List<CachedFace> ComponentFacesCached(IComponent2 comp, bool useCache,
             out string status, out double listSeconds)
         {
+            SyncCachesToSwPid(_solidWorks);
             var t = Stopwatch.StartNew();
             string key = (comp.GetPathName() ?? "") + "|" + (comp.ReferencedConfiguration ?? "");
             int stamp = -1;
@@ -62,11 +70,22 @@ namespace SolidworksExecution.Services
             FaceCacheEntry e;
             if (useCache && stamp != -1 && _faceCache.TryGetValue(key, out e) && e.Stamp == stamp)
             {
-                e.LastUsed = DateTime.UtcNow;
-                status = "hit";
-                listSeconds = e.ListSeconds;
-                ExecLog.Write($"face cache: hit {key} (key + stamp {keyMs:F0} ms)");
-                return e.Faces;
+                bool alive = true;
+                if (e.Faces.Count > 0)
+                {
+                    try { alive = e.Faces[0].Face != null && e.Faces[0].Face.GetBox() != null; }
+                    catch { alive = false; }
+                }
+                if (alive)
+                {
+                    e.LastUsed = DateTime.UtcNow;
+                    status = "hit";
+                    listSeconds = e.ListSeconds;
+                    ExecLog.Write($"face cache: hit {key} (key + stamp {keyMs:F0} ms)");
+                    return e.Faces;
+                }
+                _faceCache.Remove(key);
+                ExecLog.Write($"face cache: stale COM face handle dropped for {key}; re-listing");
             }
             var list = new List<CachedFace>();
             int idx = 0;

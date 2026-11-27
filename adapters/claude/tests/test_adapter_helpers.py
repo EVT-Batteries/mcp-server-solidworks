@@ -41,6 +41,26 @@ def test_wire_csv_round_trip_and_compare(tmp_path):
     assert lines[2].endswith("105.00,+5.00")
 
 
+def test_wire_csv_routed_mm_fallback_and_unmatched_compare(monkeypatch, tmp_path):
+    legacy = tmp_path / "legacy.csv"
+    legacy.write_text("# header note\nWire,Routed_mm\nW2,48.00\nW10,100.00\n", encoding="utf-8")
+    assert server._read_wire_csv(str(legacy)) == {"W2": 48.0, "W10": 100.0}
+
+    unmatched = tmp_path / "empty.csv"
+    unmatched.write_text("Wire,Other\nW2,12.0\n", encoding="utf-8")
+    assert server._read_wire_csv(str(unmatched)) == {}
+
+    out_csv = tmp_path / "out.csv"
+    monkeypatch.setattr(server, "_call_raw", lambda tool, params: {
+        "status": "COMPLETED", "stateVersion": 1,
+        "cadState": {"features": [json.dumps({"route": {"wires": WIRES}})]},
+    })
+    res = server._TOOL_FUNCS["routing_status"](
+        route="Harness_1-Top-1", csv_path=str(out_csv), compare_to=str(unmatched), check_stubs=False
+    )
+    assert "changed_over_1mm=0 (compare_to had 0 matching rows)" in res
+
+
 def test_failed_response_passes_details_on():
     response = {"status": "FAILED", "error": {"code": "PARTIAL", "message": "some failed"},
                 "cadState": {"features": ['{"connection_points":[{"pin":"1","error":"why"}]}']}}

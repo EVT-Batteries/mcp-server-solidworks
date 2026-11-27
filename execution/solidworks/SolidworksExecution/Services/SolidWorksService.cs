@@ -31,6 +31,7 @@ namespace SolidworksExecution.Services
             {
                 _solidWorks = AttachPreferred();
                 IsConnected = true;
+                SyncCachesToSwPid(_solidWorks);
                 EnsureVisible(); // the user must ALWAYS see what the automation does
                 return true;
             }
@@ -93,6 +94,7 @@ namespace SolidworksExecution.Services
                     var probe = AttachPreferred();
                     probe.RevisionNumber(); // confirms responsive, not just registered
                     _solidWorks = probe;
+                    SyncCachesToSwPid(_solidWorks);
                     EnsureVisible();
                     return true;
                 }

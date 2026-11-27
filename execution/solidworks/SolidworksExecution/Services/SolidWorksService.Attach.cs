@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text.RegularExpressions;
 using SolidWorks.Interop.sldworks;
+using SolidworksExecution.Infrastructure;
 
 namespace SolidworksExecution.Services
 {
@@ -26,6 +27,24 @@ namespace SolidworksExecution.Services
     public partial class SolidWorksService
     {
         internal static string LastAttachNote;
+        private static int _cachedSwPid = -1;
+
+        // Invalidates static CAD caches whenever the attached SolidWorks process changes
+        // (so restarting SLDWORKS.EXE never leaves stale COM face handles or update stamps).
+        private static void SyncCachesToSwPid(ISldWorks sw)
+        {
+            if (sw == null) return;
+            int pid = -1;
+            try { pid = sw.GetProcessID(); } catch { }
+            if (pid <= 0 || pid == _cachedSwPid) return;
+            if (_cachedSwPid != -1)
+            {
+                int faces = ClearFaceCache();
+                ClearOccupancyCaches(out int boxes, out int tess);
+                ExecLog.Write($"SolidWorks PID changed ({_cachedSwPid} -> {pid}): cleared caches (faces={faces}, boxes={boxes}, tess={tess})");
+            }
+            _cachedSwPid = pid;
+        }
 
         [DllImport("ole32.dll")] private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable rot);
         [DllImport("ole32.dll")] private static extern int CreateBindCtx(int reserved, out IBindCtx ctx);

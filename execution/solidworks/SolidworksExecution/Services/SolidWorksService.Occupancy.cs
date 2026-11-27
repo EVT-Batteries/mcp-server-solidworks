@@ -144,6 +144,14 @@ namespace SolidworksExecution.Services
         private static readonly Dictionary<string, BoxCacheEntry> _boxCache =
             new Dictionary<string, BoxCacheEntry>(StringComparer.OrdinalIgnoreCase);
 
+        private static void ClearOccupancyCaches(out int boxes, out int tess)
+        {
+            boxes = _boxCache.Count;
+            tess = _tessCache.Count;
+            _boxCache.Clear();
+            _tessCache.Clear();
+        }
+
         // The box table of the active assembly (status "hit" when its stamp is unchanged, else
         // "built": a fresh, empty table filled as boxes are read).
         private static Dictionary<string, double[]> AssemblyBoxCache(IModelDoc2 doc, out string status)
